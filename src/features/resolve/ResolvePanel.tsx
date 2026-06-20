@@ -4,8 +4,10 @@ type ResolvePanelProps = {
   urls: string;
   urlCount: number;
   isResolving: boolean;
+  isDiagnosing: boolean;
   onUrlsChange: (value: string) => void;
   onSubmit: () => void;
+  onDiagnose: () => void;
 };
 
 export function ResolvePanel(props: ResolvePanelProps) {
@@ -38,7 +40,17 @@ export function ResolvePanel(props: ResolvePanelProps) {
         {props.isResolving ? (
           <ProgressCircle aria-label="正在解析" size="S" isIndeterminate />
         ) : null}
+        {props.isDiagnosing ? (
+          <ProgressCircle aria-label="正在诊断" size="S" isIndeterminate />
+        ) : null}
         {/* While resolving, the button stays pressable and flips to a cancel action. */}
+        <Button
+          variant="secondary"
+          onPress={props.onDiagnose}
+          isDisabled={props.isResolving}
+        >
+          诊断解析
+        </Button>
         <Button
           variant={props.isResolving ? 'negative' : 'accent'}
           onPress={props.onSubmit}

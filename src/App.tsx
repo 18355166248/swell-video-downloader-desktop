@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
 import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
+import { DiagnosticPanel } from './features/resolve/DiagnosticPanel';
 import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
 import { SettingsPanel } from './features/settings/SettingsPanel';
@@ -14,8 +15,10 @@ import {
 import {
   cancelDownload,
   checkDependencies,
+  diagnoseMedia,
   generatePreview,
   getDownloadDirectorySettings,
+  getTauriErrorMessage,
   listCookieSources,
   openDownloadLocation,
   resetDownloadDir,
@@ -25,6 +28,8 @@ import {
 } from './lib/tauri';
 import type {
   CookieSource,
+  DiagnoseMediaResponse,
+  DiagnosticComparisonResult,
   DependencyStatus,
   DownloadDirectorySettings,
   MediaFormat,
@@ -203,6 +208,57 @@ function summarizeTitle(title: string, maxLength = 36): string {
   return `${title.slice(0, maxLength - 1)}…`;
 }
 
+function compareDiagnostics(
+  previous: DiagnoseMediaResponse | null,
+  current: DiagnoseMediaResponse | null,
+): DiagnosticComparisonResult | null {
+  if (!previous || !current) {
+    return null;
+  }
+
+  const pair = [previous, current];
+  const noneResult = pair.find((item) => item.diagnostics.cookieMode === 'none');
+  const accessResult = pair.find((item) => item.diagnostics.cookieMode !== 'none');
+
+  if (!noneResult || !accessResult) {
+    return {
+      kind: 'inconclusive',
+      message: '两次结果差异不明显或都失败',
+    };
+  }
+
+  if (noneResult.resolved && accessResult.resolved) {
+    const noneMax = noneResult.diagnostics.maxHeight ?? 0;
+    const accessMax = accessResult.diagnostics.maxHeight ?? 0;
+
+    if (noneMax > 0 && noneMax >= accessMax) {
+      return {
+        kind: 'same_quality',
+        message: '无 Cookie 已可拿到最高画质',
+      };
+    }
+
+    if (noneMax > 0 && accessMax > noneMax) {
+      return {
+        kind: 'quality_limited',
+        message: '无 Cookie 可解析，但画质低于带 Cookie',
+      };
+    }
+  }
+
+  if (!noneResult.resolved && accessResult.resolved) {
+    return {
+      kind: 'none_requires_access',
+      message: '无 Cookie 无法解析，带 Cookie 可解析',
+    };
+  }
+
+  return {
+    kind: 'inconclusive',
+    message: '两次结果差异不明显或都失败',
+  };
+}
+
 
 export default function App() {
   const [urls, setUrls] = useState('');
@@ -224,6 +280,11 @@ export default function App() {
   const [selectedCookieSource, setSelectedCookieSource] = useState('chrome');
   const [cookieFilePath, setCookieFilePath] = useState('');
   const [dependencyStatus, setDependencyStatus] = useState<DependencyStatus | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<DiagnoseMediaResponse | null>(null);
+  const [diagnosticUrl, setDiagnosticUrl] = useState('');
+  const [previousDiagnosticResult, setPreviousDiagnosticResult] =
+    useState<DiagnoseMediaResponse | null>(null);
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
@@ -277,7 +338,7 @@ export default function App() {
     }
 
     loadSettingsData().catch((err) => {
-      reportError(err instanceof Error ? err.message : '初始化设置数据失败');
+      reportError(getTauriErrorMessage(err, '初始化设置数据失败'));
     });
   }, []);
 
@@ -380,7 +441,7 @@ export default function App() {
         handlers.forEach((handler) => unlisteners.push(handler));
       })
       .catch((err) => {
-        reportError(err instanceof Error ? err.message : '注册下载事件失败');
+        reportError(getTauriErrorMessage(err, '注册下载事件失败'));
       });
 
     return () => {
@@ -427,6 +488,77 @@ export default function App() {
     } catch {
       patchResolvedItem(itemUrl, { thumbnail: null, isPreviewLoading: false });
     }
+  }
+
+  async function handleDiagnose() {
+    if (isDiagnosing) {
+      return;
+    }
+
+    const lines = parseBatchUrls(urls);
+    if (lines.length === 0) {
+      reportError('请先输入要诊断的视频地址。');
+      return;
+    }
+    if (lines.length !== 1) {
+      reportError('诊断解析一次只支持 1 条链接，请先保留一个地址。');
+      return;
+    }
+
+    const targetUrl = normalizeVideoUrl(lines[0]);
+    if (!targetUrl) {
+      reportError('请输入有效的视频地址后再诊断。');
+      return;
+    }
+
+    setError('');
+    setIsDiagnosing(true);
+    try {
+      const result = await diagnoseMedia(targetUrl, selectedCookieSource, cookieFilePath);
+      setPreviousDiagnosticResult(diagnosticResult);
+      setDiagnosticResult(result);
+      setDiagnosticUrl(targetUrl);
+      if (result.resolved) {
+        pushToast(`诊断完成：${summarizeTitle(result.resolved.title)}`, 'success');
+      } else {
+        pushToast('诊断完成：未解析成功，可查看诊断结果继续排查。', 'info');
+      }
+    } catch (err) {
+      reportError(getTauriErrorMessage(err, '诊断解析失败'));
+    } finally {
+      setIsDiagnosing(false);
+    }
+  }
+
+  async function handleCopyDiagnosticCommand() {
+    if (!diagnosticResult) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(diagnosticResult.diagnostics.commandPreview.displayCommand);
+      pushToast('CLI 复现命令已复制。', 'success');
+    } catch {
+      reportError('复制 CLI 命令失败，请检查剪贴板权限。');
+    }
+  }
+
+  function handleApplyDiagnosticResolved() {
+    if (!diagnosticResult?.resolved) {
+      return;
+    }
+
+    const item = {
+      url: diagnosticUrl,
+      status: 'ready' as const,
+      resolved: diagnosticResult.resolved,
+      thumbnail: diagnosticResult.resolved.thumbnail ?? null,
+      isPreviewLoading: false,
+    };
+
+    setResolvedItems([item]);
+    setExpandedUrl(item.url);
+    pushToast('已将诊断结果填充到解析列表。', 'success');
   }
 
   function handleSubmit() {
@@ -514,7 +646,7 @@ export default function App() {
         if (!isActive()) {
           return;
         }
-        const message = err instanceof Error ? err.message : '解析失败';
+        const message = getTauriErrorMessage(err, '解析失败');
         patchResolvedItem(targetUrl, { status: 'failed', error: message });
         failures.push(`${targetUrl}：${message}`);
       }
@@ -594,7 +726,7 @@ export default function App() {
       }
       return { ok: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : '创建下载任务失败';
+      const message = getTauriErrorMessage(err, '创建下载任务失败');
       reportError(message);
       return { ok: false, message };
     } finally {
@@ -611,7 +743,7 @@ export default function App() {
       await cancelDownload(row.id);
       pushToast(`正在取消：${summarizeTitle(row.title)}`, 'info');
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '取消下载失败');
+      reportError(getTauriErrorMessage(err, '取消下载失败'));
     }
   }
 
@@ -646,7 +778,7 @@ export default function App() {
     try {
       await openDownloadLocation(downloadDir, row.outputPath);
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '打开文件夹失败');
+      reportError(getTauriErrorMessage(err, '打开文件夹失败'));
     }
   }
 
@@ -657,7 +789,7 @@ export default function App() {
     try {
       await openDownloadLocation(downloadDir);
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '打开下载目录失败');
+      reportError(getTauriErrorMessage(err, '打开下载目录失败'));
     }
   }
 
@@ -675,7 +807,7 @@ export default function App() {
       }));
       pushToast('下载目录已更新。', 'success');
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '保存下载目录失败');
+      reportError(getTauriErrorMessage(err, '保存下载目录失败'));
     } finally {
       setIsSavingDownloadDirectory(false);
     }
@@ -695,7 +827,7 @@ export default function App() {
       }));
       pushToast('已恢复默认下载目录。', 'success');
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '恢复默认下载目录失败');
+      reportError(getTauriErrorMessage(err, '恢复默认下载目录失败'));
     } finally {
       setIsSavingDownloadDirectory(false);
     }
@@ -706,6 +838,7 @@ export default function App() {
     : downloadState.current.length > 0
       ? 3
       : 1;
+  const diagnosticComparison = compareDiagnostics(previousDiagnosticResult, diagnosticResult);
 
   return (
     <>
@@ -720,8 +853,10 @@ export default function App() {
             urls={urls}
             urlCount={parseBatchUrls(urls).length}
             isResolving={isResolving}
+            isDiagnosing={isDiagnosing}
             onUrlsChange={setUrls}
             onSubmit={handleSubmit}
+            onDiagnose={() => void handleDiagnose()}
           />
           <ol className="flow-progress" aria-label="操作流程">
             {HERO_STEPS.map((step) => {
@@ -737,6 +872,19 @@ export default function App() {
           </ol>
           {error ? <InlineAlert variant="negative">{error}</InlineAlert> : null}
         </section>
+
+        {diagnosticResult ? (
+          <section className="flow-step" data-step="02" aria-label="诊断结果">
+            <DiagnosticPanel
+              result={diagnosticResult}
+              previousResult={previousDiagnosticResult}
+              comparison={diagnosticComparison}
+              isDiagnosing={isDiagnosing}
+              onCopyCommand={() => void handleCopyDiagnosticCommand()}
+              onApplyResolved={handleApplyDiagnosticResolved}
+            />
+          </section>
+        ) : null}
 
         {resolvedItems.length > 0 ? (
           <section className="flow-step" data-step="02" aria-label="选择版本">

@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type {
   CookieSource,
+  DiagnoseMediaResponse,
+  DiagnosticErrorCategory,
   DependencyStatus,
   DownloadDirectorySettings,
   ResolveMediaResponse,
@@ -25,6 +27,36 @@ type ResolveMediaWireResponse = {
   thumbnail?: string | null;
 };
 
+type DiagnosticCommandPreviewWire = {
+  program: string;
+  args: string[];
+  display_command: string;
+};
+
+type MediaDiagnosticsWire = {
+  cookie_mode: string;
+  yt_dlp_source: string;
+  ffmpeg_source: string;
+  proxy_enabled: boolean;
+  command_preview: DiagnosticCommandPreviewWire;
+  formats_count: number;
+  best_format_id?: string | null;
+  best_height?: number | null;
+  max_height?: number | null;
+  best_has_audio: boolean;
+  has_muxed_format: boolean;
+  has_video_only_format: boolean;
+  has_audio_only_format: boolean;
+  error_category?: string | null;
+  normalized_message?: string | null;
+  raw_error_message?: string | null;
+};
+
+type DiagnoseMediaWireResponse = {
+  resolved?: ResolveMediaWireResponse | null;
+  diagnostics: MediaDiagnosticsWire;
+};
+
 function mapFormat(format: MediaFormatWire) {
   return {
     id: format.id,
@@ -34,6 +66,41 @@ function mapFormat(format: MediaFormatWire) {
     note: format.note,
     sizeBytes: format.size_bytes ?? null,
   };
+}
+
+function mapResolveResponse(response: ResolveMediaWireResponse): ResolveMediaResponse {
+  return {
+    title: response.title,
+    source: response.source,
+    durationText: response.duration_text,
+    recommendation: mapFormat(response.recommendation),
+    formats: response.formats.map(mapFormat),
+    thumbnail: response.thumbnail ?? null,
+  };
+}
+
+export function getTauriErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object') {
+    const maybeMessage = 'message' in error ? error.message : null;
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
+      return maybeMessage;
+    }
+
+    const maybeError = 'error' in error ? error.error : null;
+    if (typeof maybeError === 'string' && maybeError.trim()) {
+      return maybeError;
+    }
+  }
+
+  return fallback;
 }
 
 export async function resolveMedia(
@@ -48,12 +115,45 @@ export async function resolveMedia(
   });
 
   return {
-    title: response.title,
-    source: response.source,
-    durationText: response.duration_text,
-    recommendation: mapFormat(response.recommendation),
-    formats: response.formats.map(mapFormat),
-    thumbnail: response.thumbnail ?? null,
+    ...mapResolveResponse(response),
+  };
+}
+
+export async function diagnoseMedia(
+  url: string,
+  cookieSource?: string | null,
+  cookieFilePath?: string | null,
+): Promise<DiagnoseMediaResponse> {
+  const response = await invoke<DiagnoseMediaWireResponse>('diagnose_media', {
+    url,
+    cookieSource,
+    cookieFilePath,
+  });
+
+  return {
+    resolved: response.resolved ? mapResolveResponse(response.resolved) : null,
+    diagnostics: {
+      cookieMode: response.diagnostics.cookie_mode,
+      ytDlpSource: response.diagnostics.yt_dlp_source,
+      ffmpegSource: response.diagnostics.ffmpeg_source,
+      proxyEnabled: response.diagnostics.proxy_enabled,
+      commandPreview: {
+        program: response.diagnostics.command_preview.program,
+        args: response.diagnostics.command_preview.args,
+        displayCommand: response.diagnostics.command_preview.display_command,
+      },
+      formatsCount: response.diagnostics.formats_count,
+      bestFormatId: response.diagnostics.best_format_id ?? null,
+      bestHeight: response.diagnostics.best_height ?? null,
+      maxHeight: response.diagnostics.max_height ?? null,
+      bestHasAudio: response.diagnostics.best_has_audio,
+      hasMuxedFormat: response.diagnostics.has_muxed_format,
+      hasVideoOnlyFormat: response.diagnostics.has_video_only_format,
+      hasAudioOnlyFormat: response.diagnostics.has_audio_only_format,
+      errorCategory: (response.diagnostics.error_category as DiagnosticErrorCategory | null) ?? null,
+      normalizedMessage: response.diagnostics.normalized_message ?? null,
+      rawErrorMessage: response.diagnostics.raw_error_message ?? null,
+    },
   };
 }
 

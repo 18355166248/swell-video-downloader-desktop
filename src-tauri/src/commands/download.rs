@@ -257,9 +257,7 @@ fn run_download_task(
     eprintln!("[run_download_task] task_id={task_id} ffmpeg={}", ffmpeg.path.display());
 
     let mut command = Command::new(&yt_dlp.path);
-    command.arg("--newline");
-    command.arg("--progress-template");
-    command.arg("download:__PROGRESS__:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s");
+    apply_download_progress_args(&mut command);
     command.arg("--print");
     command.arg("after_move:__FINAL_PATH__:%(filepath)s");
     command.arg("-o");
@@ -780,6 +778,15 @@ fn direct_download_url(format_id: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn apply_download_progress_args(command: &mut Command) {
+    command.arg("--progress");
+    command.arg("--newline");
+    command.arg("--progress-template");
+    command.arg(
+        "download:__PROGRESS__:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+    );
+}
+
 fn requires_binary_toolchain(url: &str, format_id: Option<&str>) -> bool {
     !(url.contains("x.com")
         && format_id
@@ -885,6 +892,7 @@ fn sanitize_filename(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_download_progress_args,
         clean_format_descriptor, compose_download_title, direct_download_url,
         effective_download_dir, extract_ssstwitter_selection, format_eta,
         requires_binary_toolchain, sanitize_filename, staging_path_for,
@@ -892,10 +900,22 @@ mod tests {
     };
     use std::{
         path::{Path, PathBuf},
+        process::Command,
         sync::mpsc,
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn download_command_enables_progress_output() {
+        let mut command = Command::new("yt-dlp");
+        apply_download_progress_args(&mut command);
+
+        let rendered = format!("{command:?}");
+        assert!(rendered.contains("--progress"));
+        assert!(rendered.contains("--progress-template"));
+        assert!(rendered.contains("__PROGRESS__"));
+    }
 
     #[test]
     fn detects_http_download_url_from_format_id() {

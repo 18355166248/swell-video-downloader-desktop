@@ -1,7 +1,10 @@
 use crate::downloader::page_title::fetch_page_title;
-use crate::downloader::yt_dlp::fetch_metadata;
+use crate::downloader::yt_dlp::{
+    fetch_metadata, probe_metadata, summarize_formats, DiagnosticCommandPreview, FormatSummary,
+};
 use crate::downloader::x_probe::probe_x_guest_restriction;
 use crate::downloader::x_ssstwitter::{create_ssstwitter_selection_id, resolve_x_via_ssstwitter};
+use crate::platform::binaries::resolve_ffmpeg;
 use serde::Serialize;
 use tauri::AppHandle;
 
@@ -25,6 +28,32 @@ pub struct ResolveMediaResponse {
     pub thumbnail: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct DiagnoseMediaResponse {
+    pub resolved: Option<ResolveMediaResponse>,
+    pub diagnostics: MediaDiagnostics,
+}
+
+#[derive(Serialize)]
+pub struct MediaDiagnostics {
+    pub cookie_mode: String,
+    pub yt_dlp_source: String,
+    pub ffmpeg_source: String,
+    pub proxy_enabled: bool,
+    pub command_preview: DiagnosticCommandPreview,
+    pub formats_count: usize,
+    pub best_format_id: Option<String>,
+    pub best_height: Option<u64>,
+    pub max_height: Option<u64>,
+    pub best_has_audio: bool,
+    pub has_muxed_format: bool,
+    pub has_video_only_format: bool,
+    pub has_audio_only_format: bool,
+    pub error_category: Option<String>,
+    pub normalized_message: Option<String>,
+    pub raw_error_message: Option<String>,
+}
+
 // The work is synchronous and blocking (reqwest::blocking + yt-dlp). It must run on
 // a blocking-friendly thread via `spawn_blocking` — running it directly on the async
 // runtime panics when the reqwest client's internal tokio runtime is dropped
@@ -44,21 +73,27 @@ pub async fn resolve_media(
     .map_err(|error| format!("解析任务执行失败：{error}"))?
 }
 
+#[tauri::command]
+pub async fn diagnose_media(
+    app: AppHandle,
+    url: String,
+    cookie_source: Option<String>,
+    cookie_file_path: Option<String>,
+) -> Result<DiagnoseMediaResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        diagnose_media_blocking(app, url, cookie_source, cookie_file_path)
+    })
+    .await
+    .map_err(|error| format!("诊断任务执行失败：{error}"))?
+}
+
 fn resolve_media_blocking(
     app: AppHandle,
     url: String,
     cookie_source: Option<String>,
     cookie_file_path: Option<String>,
 ) -> Result<ResolveMediaResponse, String> {
-    if !(url.contains("x.com") || url.contains("pornhub.com")) {
-        return Err("仅支持 x.com 和 pornhub.com".into());
-    }
-
-    let source = if url.contains("x.com") {
-        "x.com".to_string()
-    } else {
-        "pornhub.com".to_string()
-    };
+    let source = resolve_source(&url)?;
     let html_title = fetch_page_title(&url);
     let metadata = match fetch_metadata(
         &app,
@@ -111,7 +146,122 @@ fn resolve_media_blocking(
         Err(error) => return Err(error),
     };
 
-    let title = pick_best_title(metadata.title.as_deref(), html_title.as_deref(), &url, &source);
+    Ok(build_resolve_response(&url, &source, html_title.as_deref(), metadata))
+}
+
+fn diagnose_media_blocking(
+    app: AppHandle,
+    url: String,
+    cookie_source: Option<String>,
+    cookie_file_path: Option<String>,
+) -> Result<DiagnoseMediaResponse, String> {
+    let source = resolve_source(&url)?;
+    let html_title = fetch_page_title(&url);
+    let ffmpeg_source = resolve_ffmpeg(&app)
+        .map(|binary| binary.source.to_string())
+        .unwrap_or_else(|| "missing".into());
+
+    match probe_metadata(
+        &app,
+        &url,
+        cookie_source.as_deref(),
+        cookie_file_path.as_deref(),
+    ) {
+        Ok(success) => {
+            let recommendation_id = success
+                .metadata
+                .formats
+                .as_deref()
+                .and_then(|formats| {
+                    formats
+                        .iter()
+                        .filter_map(|format| {
+                            let id = format.format_id.as_deref()?;
+                            let height = format.height.unwrap_or(0);
+                            let has_audio = format.acodec.as_deref().unwrap_or("none") != "none";
+                            Some((id, height, has_audio, format.filesize.or(format.filesize_approx).unwrap_or(0)))
+                        })
+                        .max_by(|left, right| {
+                            left.1
+                                .cmp(&right.1)
+                                .then_with(|| left.2.cmp(&right.2))
+                                .then_with(|| left.3.cmp(&right.3))
+                        })
+                        .map(|entry| entry.0)
+                })
+                .unwrap_or("best")
+                .to_string();
+            let summary = summarize_formats(
+                recommendation_id.as_str(),
+                success
+                    .metadata
+                    .formats
+                    .as_deref()
+                    .unwrap_or(&[]),
+            );
+            let resolved =
+                build_resolve_response(&url, &source, html_title.as_deref(), success.metadata);
+
+            Ok(DiagnoseMediaResponse {
+                resolved: Some(resolved),
+                diagnostics: diagnostics_from_summary(
+                    success.cookie_mode,
+                    success.yt_dlp_source,
+                    ffmpeg_source,
+                    success.proxy_enabled,
+                    success.command_preview,
+                    summary,
+                    None,
+                    None,
+                    None,
+                ),
+            })
+        }
+        Err(failure) => Ok(DiagnoseMediaResponse {
+            resolved: None,
+            diagnostics: diagnostics_from_summary(
+                failure.cookie_mode,
+                failure.yt_dlp_source,
+                ffmpeg_source,
+                failure.proxy_enabled,
+                failure.command_preview,
+                FormatSummary {
+                    formats_count: 0,
+                    best_format_id: None,
+                    best_height: None,
+                    max_height: None,
+                    best_has_audio: false,
+                    has_muxed_format: false,
+                    has_video_only_format: false,
+                    has_audio_only_format: false,
+                },
+                Some(failure.error_info.error_category),
+                Some(failure.error_info.normalized_message),
+                Some(failure.raw_message),
+            ),
+        }),
+    }
+}
+
+fn resolve_source(url: &str) -> Result<String, String> {
+    if !(url.contains("x.com") || url.contains("pornhub.com")) {
+        return Err("仅支持 x.com 和 pornhub.com".into());
+    }
+
+    Ok(if url.contains("x.com") {
+        "x.com".to_string()
+    } else {
+        "pornhub.com".to_string()
+    })
+}
+
+fn build_resolve_response(
+    url: &str,
+    source: &str,
+    html_title: Option<&str>,
+    metadata: crate::downloader::yt_dlp::YtDlpMetadata,
+) -> ResolveMediaResponse {
+    let title = pick_best_title(metadata.title.as_deref(), html_title, url, source);
     let duration_text = metadata
         .duration
         .map(format_duration)
@@ -139,7 +289,7 @@ fn resolve_media_blocking(
             })
         })
         .collect::<Vec<_>>();
-    let recommendation = formats.first().cloned().unwrap_or(MediaFormat {
+    let recommendation = pick_recommended_format(&formats).unwrap_or(MediaFormat {
         id: "best".into(),
         label: "best".into(),
         ext: "mp4".into(),
@@ -148,14 +298,67 @@ fn resolve_media_blocking(
         size_bytes: None,
     });
 
-    Ok(ResolveMediaResponse {
+    ResolveMediaResponse {
         title,
-        source,
+        source: source.to_string(),
         duration_text,
         recommendation,
         formats,
         thumbnail: metadata.thumbnail,
-    })
+    }
+}
+
+fn pick_recommended_format(formats: &[MediaFormat]) -> Option<MediaFormat> {
+    formats
+        .iter()
+        .max_by(|left, right| {
+            let left_height = parse_format_height(&left.label);
+            let right_height = parse_format_height(&right.label);
+
+            left_height
+                .cmp(&right_height)
+                .then_with(|| left.has_audio.cmp(&right.has_audio))
+                .then_with(|| left.size_bytes.unwrap_or(0).cmp(&right.size_bytes.unwrap_or(0)))
+        })
+        .cloned()
+}
+
+fn parse_format_height(label: &str) -> u64 {
+    label
+        .strip_suffix('p')
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn diagnostics_from_summary(
+    cookie_mode: String,
+    yt_dlp_source: String,
+    ffmpeg_source: String,
+    proxy_enabled: bool,
+    command_preview: DiagnosticCommandPreview,
+    summary: FormatSummary,
+    error_category: Option<String>,
+    normalized_message: Option<String>,
+    raw_error_message: Option<String>,
+) -> MediaDiagnostics {
+    MediaDiagnostics {
+        cookie_mode,
+        yt_dlp_source,
+        ffmpeg_source,
+        proxy_enabled,
+        command_preview,
+        formats_count: summary.formats_count,
+        best_format_id: summary.best_format_id,
+        best_height: summary.best_height,
+        max_height: summary.max_height,
+        best_has_audio: summary.best_has_audio,
+        has_muxed_format: summary.has_muxed_format,
+        has_video_only_format: summary.has_video_only_format,
+        has_audio_only_format: summary.has_audio_only_format,
+        error_category,
+        normalized_message,
+        raw_error_message,
+    }
 }
 
 fn pick_best_title(
@@ -236,7 +439,10 @@ fn format_duration(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_title_from_url, pick_best_title};
+    use super::{
+        fallback_title_from_url, pick_best_title, pick_recommended_format, resolve_source,
+        MediaFormat,
+    };
 
     #[test]
     fn prefers_metadata_title_over_html_title() {
@@ -288,5 +494,38 @@ mod tests {
         );
 
         assert_eq!(title, "@4Brazzerlive - 2068239068916507115");
+    }
+
+    #[test]
+    fn rejects_unsupported_hosts_from_resolve_and_diagnose_paths() {
+        let error = resolve_source("https://example.com/video/123").expect_err("host should reject");
+
+        assert!(error.contains("仅支持"));
+    }
+
+    #[test]
+    fn recommends_highest_quality_over_first_format() {
+        let recommendation = pick_recommended_format(&[
+            MediaFormat {
+                id: "low".into(),
+                label: "240p".into(),
+                ext: "mp4".into(),
+                has_audio: false,
+                note: "low".into(),
+                size_bytes: Some(10),
+            },
+            MediaFormat {
+                id: "best".into(),
+                label: "1080p".into(),
+                ext: "mp4".into(),
+                has_audio: false,
+                note: "best".into(),
+                size_bytes: Some(20),
+            },
+        ])
+        .expect("recommendation should exist");
+
+        assert_eq!(recommendation.id, "best");
+        assert_eq!(recommendation.label, "1080p");
     }
 }

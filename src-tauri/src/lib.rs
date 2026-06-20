@@ -9,6 +9,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::resolve::resolve_media,
+            commands::resolve::diagnose_media,
             commands::download::start_download,
             commands::download::cancel_download,
             commands::download::get_download_dir,
