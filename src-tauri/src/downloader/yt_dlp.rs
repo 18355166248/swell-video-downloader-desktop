@@ -1,8 +1,20 @@
 use serde::Deserialize;
-use std::{path::Path, process::Command};
+use std::{
+    io::Read,
+    path::Path,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 use tauri::AppHandle;
 
 use crate::platform::binaries::resolve_yt_dlp;
+
+/// Upper bound on a single yt-dlp metadata probe. Without it a stuck yt-dlp (slow
+/// network extraction, a wedged `--cookies-from-browser` read) would hang resolve
+/// forever with no feedback in the UI. On timeout we error out so x.com can fall
+/// back to ssstwitter instead of spinning indefinitely.
+const YT_DLP_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 pub struct YtDlpFormat {
@@ -11,6 +23,8 @@ pub struct YtDlpFormat {
     pub height: Option<u64>,
     pub acodec: Option<String>,
     pub format_note: Option<String>,
+    pub filesize: Option<u64>,
+    pub filesize_approx: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -18,6 +32,7 @@ pub struct YtDlpMetadata {
     pub title: Option<String>,
     pub duration: Option<f64>,
     pub formats: Option<Vec<YtDlpFormat>>,
+    pub thumbnail: Option<String>,
 }
 
 pub fn fetch_metadata(
@@ -32,12 +47,12 @@ pub fn fetch_metadata(
 
     let mut command = Command::new(&binary.path);
     command.arg("-J");
+    apply_proxy(&mut command);
     apply_cookie_source(&mut command, cookie_source, cookie_file_path)?;
     command.arg(url);
 
-    let output = command
-        .output()
-        .map_err(|err| format!("无法启动 yt-dlp（{}）：{err}", binary.source))?;
+    let output = output_with_timeout(command, YT_DLP_METADATA_TIMEOUT)
+        .map_err(|err| format!("{err}（yt-dlp 来源：{}）", binary.source))?;
 
     if !output.status.success() {
         return Err(normalize_yt_dlp_error(
@@ -46,6 +61,65 @@ pub fn fetch_metadata(
     }
 
     serde_json::from_slice(&output.stdout).map_err(|err| format!("解析 yt-dlp 输出失败：{err}"))
+}
+
+/// Run a command to completion but kill it if it exceeds `timeout`. stdout/stderr
+/// are drained on dedicated threads so a child that fills a pipe buffer can't
+/// deadlock while we poll for exit.
+fn output_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("无法启动 yt-dlp：{err}"))?;
+
+    let mut child_stdout = child.stdout.take().expect("piped stdout");
+    let mut child_stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = child_stdout.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let started_at = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started_at.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "yt-dlp 解析超时（超过 {} 秒）。可能卡在读取浏览器 Cookie，可在设置里改用「无 Cookie」或手动导入 cookies.txt 后重试。",
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(format!("等待 yt-dlp 进程失败：{err}")),
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Route yt-dlp through the detected system proxy (same rationale as the reqwest
+/// client). Without it, yt-dlp connects directly to the site/CDN.
+pub fn apply_proxy(command: &mut Command) {
+    if let Some(proxy) = crate::platform::proxy::detect_proxy() {
+        command.arg("--proxy");
+        command.arg(proxy);
+    }
 }
 
 pub fn apply_cookie_source(

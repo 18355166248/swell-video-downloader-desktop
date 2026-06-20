@@ -1,7 +1,33 @@
+/* ============================================================================
+   Swell — "Warm Editorial Console"
+   Paper-warm light theme · ink text · single vermilion accent · Fraunces display.
+   Goal: open up the cramped layout with air, hairlines, and quiet hierarchy.
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&display=swap');
+
 :root {
-  color: #1b1b1b;
-  background: #f5f1e8;
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --paper: #f1ebdd;
+  --paper-raised: #fbf8f1;
+  --paper-sunk: #ece4d3;
+  --ink: #211d18;
+  --ink-soft: #6f665a;
+  --ink-faint: #9a9081;
+  --accent: #d24320;
+  --accent-deep: #a8330f;
+  --accent-wash: rgba(210, 67, 32, 0.08);
+  --line: rgba(33, 29, 24, 0.1);
+  --line-strong: rgba(33, 29, 24, 0.18);
+  --shadow-sm: 0 1px 2px rgba(33, 29, 24, 0.04), 0 2px 8px rgba(33, 29, 24, 0.05);
+  --shadow-md: 0 4px 14px rgba(33, 29, 24, 0.07), 0 12px 30px rgba(33, 29, 24, 0.06);
+  --font-display: "Fraunces", "Constantia", Georgia, serif;
+  --font-ui: "Hanken Grotesk", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--font-ui);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 * {
@@ -10,51 +36,166 @@
 
 body {
   margin: 0;
-  min-width: 1200px;
+  min-width: 960px;
   min-height: 100vh;
+  position: relative;
   background:
-    radial-gradient(circle at top left, rgba(235, 111, 58, 0.12), transparent 28%),
-    radial-gradient(circle at right center, rgba(53, 99, 233, 0.12), transparent 24%),
-    #f5f1e8;
+    radial-gradient(900px 520px at 12% -8%, rgba(210, 67, 32, 0.1), transparent 62%),
+    radial-gradient(820px 600px at 108% 18%, rgba(53, 99, 233, 0.08), transparent 58%),
+    var(--paper);
+}
+
+/* Fine grain overlay for paper texture — sits above the wash, below content. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.4;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
 }
 
 #root {
+  position: relative;
+  z-index: 1;
   min-height: 100vh;
 }
 
+/* ----------------------------------------------------------- shell + hero */
+
 .app-shell {
-  width: min(1320px, calc(100vw - 64px));
+  width: min(880px, calc(100vw - 80px));
   margin: 0 auto;
-  padding: 40px 0 56px;
+  padding: 72px 0 96px;
 }
 
 .hero-block {
   display: grid;
-  gap: 12px;
-  margin-bottom: 28px;
+  gap: 14px;
+  margin-bottom: 52px;
+  padding-bottom: 32px;
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  animation: rise-in 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* Hairline accent tick anchoring the eyebrow to the baseline rule. */
+.hero-block::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 64px;
+  height: 2px;
+  background: var(--accent);
 }
 
 .eyebrow {
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #b34d22;
+  color: var(--accent-deep);
 }
 
-.workspace-grid {
+.eyebrow::before {
+  content: "";
+  width: 22px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.app-shell .hero-title {
+  font-family: var(--font-display) !important;
+  font-weight: 500 !important;
+  font-size: clamp(40px, 5vw, 60px) !important;
+  line-height: 1.02 !important;
+  letter-spacing: -0.02em !important;
+  color: var(--ink) !important;
+  margin: 4px 0 0 !important;
+}
+
+.app-shell .hero-title em {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.hero-sub {
+  max-width: 60ch;
+  font-size: 15.5px;
+  line-height: 1.65;
+  color: var(--ink-soft);
+}
+
+/* --------------------------------------------------- single-column flow */
+
+.flow {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
-  gap: 20px;
-  align-items: start;
+  gap: 40px;
+  counter-reset: step;
 }
 
-.left-column,
-.right-column,
-.panel-stack,
-.result-meta {
+/* Each step is numbered in the left gutter — a quiet "do this, then this" rail.
+   Counter (not a fixed attr) so the numbering stays sequential even when the
+   result step is absent before the first resolve. */
+.flow-step {
+  position: relative;
   display: grid;
   gap: 16px;
+  counter-increment: step;
+  animation: rise-in 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.flow-step::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute;
+  left: -56px;
+  top: 2px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+
+/* Hide the gutter numbers when the window can't spare the room. */
+@media (max-width: 1040px) {
+  .flow-step::before { display: none; }
+}
+
+.flow-step:nth-child(1) { animation-delay: 0.06s; }
+.flow-step:nth-child(2) { animation-delay: 0.12s; }
+.flow-step:nth-child(3) { animation-delay: 0.18s; }
+.flow-step:nth-child(4) { animation-delay: 0.24s; }
+
+.panel-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-kicker {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .action-row {
@@ -63,16 +204,257 @@ body {
   flex-wrap: wrap;
 }
 
-.downloads-table,
-.result-card,
-.settings-card {
+/* ----------------------------------------------------- paper card shell
+
+   Spectrum's <Card> is a fixed-width gallery component that refuses to fill its
+   container, so our container cards are plain styled divs instead. */
+.paper-card {
+  width: 100%;
+  padding: 30px 32px 32px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.app-shell .card-title {
+  font-family: var(--font-display) !important;
+  font-weight: 500 !important;
+  font-size: 22px !important;
+  line-height: 1.2 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ink) !important;
+  margin: 0 0 20px !important;
+}
+
+.card-body {
+  display: block;
+}
+
+.resolve-card {
+  display: grid;
+  gap: 18px;
+}
+
+.downloads-table {
   width: 100%;
 }
 
+.download-tabs {
+  display: inline-flex;
+  gap: 10px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.download-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 18px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.download-tab:hover {
+  color: var(--ink);
+}
+
+.download-tab.is-active {
+  background: var(--ink);
+  color: var(--paper-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.download-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Keep Spectrum's collection components from collapsing to intrinsic width. */
+.downloads-table > *,
+.downloads-table [role="grid"] {
+  width: 100% !important;
+}
+
+/* ------------------------------------------------------------- preview */
+
+.preview-frame {
+  width: 100%;
+  margin: 4px 0 22px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #1a1714;
+  box-shadow: var(--shadow-md);
+}
+
+.preview-image {
+  display: block;
+  width: 100%;
+  max-height: 380px;
+  object-fit: contain;
+  background: #1a1714;
+}
+
+.preview-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  background:
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.03) 0 10px, transparent 10px 20px),
+    #1a1714;
+}
+
+/* ------------------------------------------------------- result meta pills */
+
+.result-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 26px;
+}
+
+.result-meta .meta-tag {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink-soft);
+  padding: 5px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper-raised);
+}
+
+/* --------------------------------------------------------- format catalog */
+
+.format-list-title {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.format-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  counter-reset: fmt;
+}
+
+.format-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px 15px 52px;
+  border-radius: 13px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+/* Editorial catalog numbering. */
+.format-row::before {
+  counter-increment: fmt;
+  content: counter(fmt, decimal-leading-zero);
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-faint);
+  transition: color 0.18s ease;
+}
+
+.format-row:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+}
+
+.format-row:hover::before {
+  color: var(--accent);
+}
+
+.format-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.format-label {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.format-sub {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  letter-spacing: 0.01em;
+}
+
+/* --------------------------------------------------------- download dir bar */
+
+.download-dir-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-radius: 13px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.download-dir-path {
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-ligatures: none;
+}
+
+/* -------------------------------------------------------------- settings */
+
 .dependency-grid {
   display: flex;
-  gap: 16px;
+  gap: 20px;
   flex-wrap: wrap;
+  padding: 14px 0 4px;
+}
+
+.download-dir-settings {
+  display: grid;
+  gap: 14px;
 }
 
 .dependency-grid [role="status"] {

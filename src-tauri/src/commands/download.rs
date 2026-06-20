@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{BufRead, BufReader, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -15,11 +15,11 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     downloader::x_ssstwitter::{
-        download_x_via_ssstwitter_to_path, extract_ssstwitter_selection_label,
+        download_selection_to_path, extract_ssstwitter_selection, SssTwitterSelection,
     },
     events::download_events::{DOWNLOAD_ERROR, DOWNLOAD_PROGRESS, DOWNLOAD_STATUS},
     platform::binaries::{resolve_ffmpeg, resolve_yt_dlp},
-    downloader::yt_dlp::{apply_cookie_source, normalize_yt_dlp_error},
+    downloader::yt_dlp::{apply_cookie_source, apply_proxy, normalize_yt_dlp_error},
 };
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -39,6 +39,18 @@ struct DownloadProgressPayload {
     percent: String,
     speed: String,
     eta: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct AppSettings {
+    download_dir: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DownloadDirectorySettings {
+    pub current_dir: String,
+    pub default_dir: String,
+    pub is_custom: bool,
 }
 
 #[tauri::command]
@@ -124,16 +136,13 @@ fn run_download_task(
     fs::create_dir_all(&download_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
     if url.contains("x.com") {
-        if let Some(selection_label) = format_id
-            .as_deref()
-            .and_then(extract_ssstwitter_selection_label)
-        {
+        if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
             return run_ssstwitter_download_task(
                 app,
                 task_id,
                 title,
                 url,
-                &selection_label,
+                selection,
                 download_dir,
             );
         }
@@ -146,7 +155,7 @@ fn run_download_task(
     command.arg("--print");
     command.arg("after_move:__FINAL_PATH__:%(filepath)s");
     command.arg("-o");
-    command.arg(download_dir.join("%(title)s [%(id)s].%(ext)s"));
+    command.arg(download_dir.join(format!("{}.%(ext)s", sanitize_filename(&title))));
 
     let direct_download_url = direct_download_url(format_id.as_deref());
 
@@ -157,6 +166,7 @@ fn run_download_task(
         }
     }
 
+    apply_proxy(&mut command);
     apply_cookie_source(
         &mut command,
         cookie_source.as_deref(),
@@ -342,17 +352,74 @@ fn emit_error(app: &AppHandle, payload: DownloadStatusPayload) {
     let _ = app.emit(DOWNLOAD_STATUS, payload);
 }
 
-fn resolve_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(path) = app.path().download_dir() {
-        return Ok(path);
+/// The directory finished downloads land in. Created on access so the UI can open
+/// it even before the first download completes.
+#[tauri::command(async)]
+pub fn get_download_dir(app: AppHandle) -> Result<String, String> {
+    let dir = resolve_download_dir(&app)?;
+    fs::create_dir_all(&dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    Ok(dir.display().to_string())
+}
+
+#[tauri::command(async)]
+pub fn get_download_dir_settings(app: AppHandle) -> Result<DownloadDirectorySettings, String> {
+    let default_dir = default_download_dir(&app)?;
+    let settings = load_app_settings(&app)?;
+    let current_dir = effective_download_dir(default_dir.clone(), settings.download_dir.as_deref());
+
+    fs::create_dir_all(&current_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+
+    Ok(DownloadDirectorySettings {
+        current_dir: current_dir.display().to_string(),
+        default_dir: default_dir.display().to_string(),
+        is_custom: settings
+            .download_dir
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    })
+}
+
+#[tauri::command(async)]
+pub fn set_download_dir(app: AppHandle, path: String) -> Result<String, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("下载目录不能为空。".into());
     }
 
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let target = PathBuf::from(trimmed);
+    fs::create_dir_all(&target).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
-    Ok(project_root.join("downloads"))
+    let mut settings = load_app_settings(&app)?;
+    settings.download_dir = Some(target.display().to_string());
+    save_app_settings(&app, &settings)?;
+    Ok(target.display().to_string())
+}
+
+#[tauri::command(async)]
+pub fn reset_download_dir(app: AppHandle) -> Result<String, String> {
+    let mut settings = load_app_settings(&app)?;
+    settings.download_dir = None;
+    save_app_settings(&app, &settings)?;
+
+    let default_dir = default_download_dir(&app)?;
+    fs::create_dir_all(&default_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    Ok(default_dir.display().to_string())
+}
+
+/// Downloads land in a dedicated `video-downloader` subfolder of the user's
+/// Downloads directory (e.g. `C:\Users\<user>\Downloads\video-downloader`). The
+/// opener scope in capabilities (`$DOWNLOAD/**`) must cover this for "打开下载目录".
+const DOWNLOAD_SUBDIR: &str = "video-downloader";
+const INCOMPLETE_SUBDIR: &str = "incomplete";
+
+fn resolve_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let default_dir = default_download_dir(app)?;
+    let settings = load_app_settings(app)?;
+    Ok(effective_download_dir(
+        default_dir,
+        settings.download_dir.as_deref(),
+    ))
 }
 
 fn run_ssstwitter_download_task(
@@ -360,9 +427,11 @@ fn run_ssstwitter_download_task(
     task_id: String,
     title: String,
     url: String,
-    selection_label: &str,
+    selection: SssTwitterSelection,
     download_dir: PathBuf,
 ) -> Result<(), String> {
+    let selection_label = selection.label.as_str();
+    let file_title = compose_download_title(&title, Some(selection_label));
     emit_status(
         &app,
         DownloadStatusPayload {
@@ -376,36 +445,67 @@ fn run_ssstwitter_download_task(
 
     let output_path = download_dir.join(format!(
         "{}.{}",
-        sanitize_filename(&format!("{title} [{selection_label}]")),
+        sanitize_filename(&file_title),
         "mp4"
     ));
-    let started_at = Instant::now();
+    // Stream into the system temp dir, then move into Downloads on completion.
+    // Windows Defender scans the Downloads folder far more aggressively (downloaded-
+    // file / mark-of-the-web handling), throttling the active write; temp is lighter,
+    // and the final same-volume rename is an instant metadata op.
+    let staging_path = staging_path_for(&download_dir, &task_id);
+    if let Some(parent) = staging_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建临时下载目录失败：{err}"))?;
+    }
+
+    // Timing starts at the first received byte (not before), and speed is sampled
+    // over the last interval so the UI shows real throughput instead of an average
+    // that is dragged down by connection setup.
+    let mut transfer_started_at: Option<Instant> = None;
     let mut last_emit_at = Instant::now() - Duration::from_secs(1);
-    let result = download_x_via_ssstwitter_to_path(
+    let mut last_sample: Option<(Instant, u64)> = None;
+    let result = download_selection_to_path(
         &url,
+        selection.direct_url.as_deref(),
         Some(selection_label),
-        &output_path,
+        &staging_path,
         None,
         |downloaded_bytes, total_bytes| {
+            let now = Instant::now();
+            let started_at = *transfer_started_at.get_or_insert(now);
             if last_emit_at.elapsed() >= Duration::from_millis(300) {
-                emit_progress(
-                    &app,
-                    task_id.as_str(),
-                    downloaded_bytes,
-                    total_bytes,
-                    started_at,
-                );
-                last_emit_at = Instant::now();
+                let speed_bps = match last_sample {
+                    Some((sample_at, sample_bytes)) => {
+                        let dt = now.duration_since(sample_at).as_secs_f64().max(0.001);
+                        (downloaded_bytes.saturating_sub(sample_bytes)) as f64 / dt
+                    }
+                    None => {
+                        let dt = now.duration_since(started_at).as_secs_f64().max(0.001);
+                        downloaded_bytes as f64 / dt
+                    }
+                };
+                emit_progress(&app, task_id.as_str(), downloaded_bytes, total_bytes, speed_bps);
+                last_emit_at = now;
+                last_sample = Some((now, downloaded_bytes));
             }
         },
-    )?;
+    );
 
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => return Err(error),
+    };
+
+    move_into_place(&staging_path, &output_path)?;
+
+    let overall_bps = transfer_started_at
+        .map(|started| result.downloaded_bytes as f64 / started.elapsed().as_secs_f64().max(0.001))
+        .unwrap_or(0.0);
     emit_progress(
         &app,
         task_id.as_str(),
         result.downloaded_bytes,
         result.total_bytes,
-        started_at,
+        overall_bps,
     );
 
     emit_status(
@@ -421,6 +521,80 @@ fn run_ssstwitter_download_task(
     Ok(())
 }
 
+/// A staging file in the system temp dir for an in-progress download.
+fn staging_path_for(download_dir: &Path, task_id: &str) -> PathBuf {
+    download_dir
+        .join(INCOMPLETE_SUBDIR)
+        .join(format!("{task_id}.part"))
+}
+
+/// Move the finished staging file to its destination. A same-volume rename is an
+/// instant metadata operation; if the destination is on another volume the rename
+/// fails with a cross-device error, so we fall back to copy + delete.
+fn move_into_place(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    }
+
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(from, to).map_err(|err| format!("移动下载文件失败：{err}"))?;
+            let _ = fs::remove_file(from);
+            Ok(())
+        }
+    }
+}
+
+fn default_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(path) = app.path().download_dir() {
+        return Ok(path.join(DOWNLOAD_SUBDIR));
+    }
+
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    Ok(project_root.join("downloads").join(DOWNLOAD_SUBDIR))
+}
+
+fn effective_download_dir(default_dir: PathBuf, configured_dir: Option<&str>) -> PathBuf {
+    configured_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(default_dir)
+}
+
+fn app_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("读取配置目录失败：{err}"))?;
+    Ok(config_dir.join("settings.json"))
+}
+
+fn load_app_settings(app: &AppHandle) -> Result<AppSettings, String> {
+    let path = app_settings_path(app)?;
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+
+    let contents = fs::read_to_string(&path).map_err(|err| format!("读取设置失败：{err}"))?;
+    serde_json::from_str(&contents).map_err(|err| format!("解析设置失败：{err}"))
+}
+
+fn save_app_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    let path = app_settings_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("创建配置目录失败：{err}"))?;
+    }
+
+    let json = serde_json::to_string_pretty(settings).map_err(|err| format!("序列化设置失败：{err}"))?;
+    fs::write(path, json).map_err(|err| format!("保存设置失败：{err}"))
+}
+
 fn direct_download_url(format_id: Option<&str>) -> Option<String> {
     format_id
         .map(str::trim)
@@ -428,15 +602,36 @@ fn direct_download_url(format_id: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn compose_download_title(base_title: &str, format_label: Option<&str>) -> String {
+    let base = base_title.trim();
+    let descriptor = format_label.and_then(clean_format_descriptor);
+    match descriptor {
+        Some(value) if !base.contains(&value) => format!("{base} - {value}"),
+        _ => base.to_string(),
+    }
+}
+
+fn clean_format_descriptor(label: &str) -> Option<String> {
+    let cleaned = label
+        .trim()
+        .strip_prefix("下载")
+        .unwrap_or(label.trim())
+        .trim();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+}
+
 fn emit_progress(
     app: &AppHandle,
     task_id: &str,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
-    started_at: Instant,
+    bytes_per_second: f64,
 ) {
-    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-    let bytes_per_second = downloaded_bytes as f64 / elapsed;
     let speed = human_speed(bytes_per_second);
 
     let (percent, eta) = if let Some(total) = total_bytes.filter(|value| *value > 0) {
@@ -504,7 +699,12 @@ fn sanitize_filename(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_download_url, extract_ssstwitter_selection_label, format_eta, sanitize_filename};
+    use super::{
+        clean_format_descriptor, compose_download_title, direct_download_url,
+        effective_download_dir, extract_ssstwitter_selection, format_eta, sanitize_filename,
+        staging_path_for,
+    };
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn detects_http_download_url_from_format_id() {
@@ -529,10 +729,10 @@ mod tests {
             direct_download_url(Some("ssstwitter:下载 HD 1080x1080")),
             None
         );
-        assert_eq!(
-            extract_ssstwitter_selection_label("ssstwitter:下载 HD 1080x1080").as_deref(),
-            Some("下载 HD 1080x1080")
-        );
+        let selection = extract_ssstwitter_selection("ssstwitter:下载 HD 1080x1080")
+            .expect("selection should decode");
+        assert_eq!(selection.label, "下载 HD 1080x1080");
+        assert_eq!(selection.direct_url, None);
     }
 
     #[test]
@@ -547,5 +747,58 @@ mod tests {
     fn formats_eta_as_minutes_and_seconds() {
         assert_eq!(format_eta(5.0), "00:05");
         assert_eq!(format_eta(65.0), "01:05");
+    }
+
+    #[test]
+    fn prefers_custom_download_dir_when_configured() {
+        let dir = effective_download_dir(
+            PathBuf::from(r"C:\Users\Administrator\Downloads\video-downloader"),
+            Some(r"D:\Media\Twitter"),
+        );
+
+        assert_eq!(dir, PathBuf::from(r"D:\Media\Twitter"));
+    }
+
+    #[test]
+    fn keeps_default_download_dir_when_override_is_blank() {
+        let default_dir = PathBuf::from(r"C:\Users\Administrator\Downloads\video-downloader");
+        let dir = effective_download_dir(default_dir.clone(), Some("   "));
+
+        assert_eq!(dir, default_dir);
+    }
+
+    #[test]
+    fn stores_partial_files_inside_visible_incomplete_folder() {
+        let path = staging_path_for(Path::new(r"C:\Downloads\video-downloader"), "task-42");
+
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Downloads\video-downloader\incomplete\task-42.part")
+        );
+    }
+
+    #[test]
+    fn strips_download_prefix_from_quality_labels() {
+        assert_eq!(
+            clean_format_descriptor("下载 HD 1080x1080").as_deref(),
+            Some("HD 1080x1080")
+        );
+        assert_eq!(clean_format_descriptor("  下载 720p ").as_deref(), Some("720p"));
+    }
+
+    #[test]
+    fn avoids_duplicate_quality_suffix_when_title_already_contains_it() {
+        assert_eq!(
+            compose_download_title("@4Brazzerlive 的 X 视频 - HD 1080x1080", Some("下载 HD 1080x1080")),
+            "@4Brazzerlive 的 X 视频 - HD 1080x1080"
+        );
+    }
+
+    #[test]
+    fn appends_clean_quality_once_when_missing_from_title() {
+        assert_eq!(
+            compose_download_title("@4Brazzerlive 的 X 视频", Some("下载 HD 1080x1080")),
+            "@4Brazzerlive 的 X 视频 - HD 1080x1080"
+        );
     }
 }

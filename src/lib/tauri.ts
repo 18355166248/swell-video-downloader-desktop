@@ -1,25 +1,40 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { CookieSource, DependencyStatus, ResolveMediaResponse } from './types';
+import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+import type {
+  CookieSource,
+  DependencyStatus,
+  DownloadDirectorySettings,
+  ResolveMediaResponse,
+} from './types';
+
+type MediaFormatWire = {
+  id: string;
+  label: string;
+  ext: string;
+  has_audio: boolean;
+  note: string;
+  size_bytes?: number | null;
+};
 
 type ResolveMediaWireResponse = {
   title: string;
   source: 'x.com' | 'pornhub.com';
   duration_text: string;
-  recommendation: {
-    id: string;
-    label: string;
-    ext: string;
-    has_audio: boolean;
-    note: string;
-  };
-  formats: Array<{
-    id: string;
-    label: string;
-    ext: string;
-    has_audio: boolean;
-    note: string;
-  }>;
+  recommendation: MediaFormatWire;
+  formats: MediaFormatWire[];
+  thumbnail?: string | null;
 };
+
+function mapFormat(format: MediaFormatWire) {
+  return {
+    id: format.id,
+    label: format.label,
+    ext: format.ext,
+    hasAudio: format.has_audio,
+    note: format.note,
+    sizeBytes: format.size_bytes ?? null,
+  };
+}
 
 export async function resolveMedia(
   url: string,
@@ -36,21 +51,49 @@ export async function resolveMedia(
     title: response.title,
     source: response.source,
     durationText: response.duration_text,
-    recommendation: {
-      id: response.recommendation.id,
-      label: response.recommendation.label,
-      ext: response.recommendation.ext,
-      hasAudio: response.recommendation.has_audio,
-      note: response.recommendation.note,
-    },
-    formats: response.formats.map((format) => ({
-      id: format.id,
-      label: format.label,
-      ext: format.ext,
-      hasAudio: format.has_audio,
-      note: format.note,
-    })),
+    recommendation: mapFormat(response.recommendation),
+    formats: response.formats.map(mapFormat),
+    thumbnail: response.thumbnail ?? null,
   };
+}
+
+export async function generatePreview(url: string, formatId: string): Promise<string> {
+  return invoke<string>('generate_preview', { url, formatId });
+}
+
+export async function getDownloadDir(): Promise<string> {
+  return invoke<string>('get_download_dir');
+}
+
+type DownloadDirectorySettingsWire = {
+  current_dir: string;
+  default_dir: string;
+  is_custom: boolean;
+};
+
+export async function getDownloadDirectorySettings(): Promise<DownloadDirectorySettings> {
+  const response = await invoke<DownloadDirectorySettingsWire>('get_download_dir_settings');
+  return {
+    currentDir: response.current_dir,
+    defaultDir: response.default_dir,
+    isCustom: response.is_custom,
+  };
+}
+
+export async function setDownloadDir(path: string): Promise<string> {
+  return invoke<string>('set_download_dir', { path });
+}
+
+export async function resetDownloadDir(): Promise<string> {
+  return invoke<string>('reset_download_dir');
+}
+
+/** Open the download folder, selecting the finished file when its path is known. */
+export async function openDownloadLocation(downloadDir: string, filePath?: string | null) {
+  if (filePath) {
+    return revealItemInDir(filePath);
+  }
+  return openPath(downloadDir);
 }
 
 type CookieSourceWire = {

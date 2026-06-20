@@ -4,6 +4,7 @@ export type MediaFormat = {
   ext: string;
   hasAudio: boolean;
   note: string;
+  sizeBytes?: number | null;
 };
 
 export type ResolveMediaResponse = {
@@ -12,6 +13,7 @@ export type ResolveMediaResponse = {
   durationText: string;
   recommendation: MediaFormat;
   formats: MediaFormat[];
+  thumbnail?: string | null;
 };
 
 export type CookieSource = {
@@ -24,4 +26,10 @@ export type DependencyStatus = {
   ffmpegOk: boolean;
   ytDlpSource: string;
   ffmpegSource: string;
+};
+
+export type DownloadDirectorySettings = {
+  currentDir: string;
+  defaultDir: string;
+  isCustom: boolean;
 };
