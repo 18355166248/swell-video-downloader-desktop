@@ -1,0 +1,80 @@
+:root {
+  color: #1b1b1b;
+  background: #f5f1e8;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1200px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(235, 111, 58, 0.12), transparent 28%),
+    radial-gradient(circle at right center, rgba(53, 99, 233, 0.12), transparent 24%),
+    #f5f1e8;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  width: min(1320px, calc(100vw - 64px));
+  margin: 0 auto;
+  padding: 40px 0 56px;
+}
+
+.hero-block {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b34d22;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.left-column,
+.right-column,
+.panel-stack,
+.result-meta {
+  display: grid;
+  gap: 16px;
+}
+
+.action-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.downloads-table,
+.result-card,
+.settings-card {
+  width: 100%;
+}
+
+.dependency-grid {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.dependency-grid [role="status"] {
+  white-space: nowrap;
+}
