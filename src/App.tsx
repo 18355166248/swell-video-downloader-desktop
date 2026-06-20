@@ -81,14 +81,23 @@ function mergeRowsById(primary: DownloadRow[], secondary: DownloadRow[]): Downlo
   return merged;
 }
 
-function archiveCurrentRows(state: DownloadBucketState): DownloadBucketState {
-  if (state.current.length === 0) {
+const ACTIVE_STATUSES = ['queued', 'downloading', 'postprocessing', 'canceling'];
+
+function isActiveStatus(status: string): boolean {
+  return ACTIVE_STATUSES.includes(status);
+}
+
+// Move only finished (completed/failed/canceled) rows into history; downloads
+// still in flight stay in the current queue so a new resolve never kills them.
+function archiveFinishedRows(state: DownloadBucketState): DownloadBucketState {
+  const finished = state.current.filter((row) => !isActiveStatus(row.status));
+  if (finished.length === 0) {
     return state;
   }
 
   return {
-    current: [],
-    history: mergeRowsById(state.current, state.history),
+    current: state.current.filter((row) => isActiveStatus(row.status)),
+    history: mergeRowsById(finished, state.history),
   };
 }
 
@@ -218,6 +227,9 @@ export default function App() {
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
+  // Task ids the user removed from the list — late progress/status events for
+  // these are ignored so a deleted row never re-appears.
+  const dismissedDownloadIds = useRef<Set<string>>(new Set());
   // Monotonic token identifying the active resolve run. Bumping it cancels the
   // in-flight run: stale awaits see a mismatch and bail without touching state.
   const resolveSessionRef = useRef(0);
@@ -284,6 +296,9 @@ export default function App() {
 
     Promise.all([
       listenDownloadProgress((payload) => {
+        if (dismissedDownloadIds.current.has(payload.task_id)) {
+          return;
+        }
         setDownloadState((current) =>
           updateRowCollections(
             current,
@@ -302,6 +317,9 @@ export default function App() {
         );
       }),
       listenDownloadStatus((payload) => {
+        if (dismissedDownloadIds.current.has(payload.task_id)) {
+          return;
+        }
         if (
           (payload.status === 'completed' || payload.status === 'failed') &&
           !notifiedDownloadIds.current.has(payload.task_id)
@@ -345,6 +363,9 @@ export default function App() {
         );
       }),
       listenDownloadError((payload) => {
+        if (payload.task_id && dismissedDownloadIds.current.has(payload.task_id)) {
+          return;
+        }
         if (payload.message) {
           if (payload.task_id && notifiedDownloadIds.current.has(payload.task_id)) {
             return;
@@ -468,10 +489,8 @@ export default function App() {
         isPreviewLoading: false,
       })),
     );
-    if (downloadState.current.length > 0) {
-      pushToast('已开始新的解析会话，当前队列已清空。', 'info');
-    }
-    setDownloadState((current) => archiveCurrentRows(current));
+    // Keep in-flight downloads running; only sweep finished ones into history.
+    setDownloadState((current) => archiveFinishedRows(current));
 
     let successCount = 0;
     let lastFormatCount = 0;
@@ -604,6 +623,25 @@ export default function App() {
       history: current.history.filter((item) => item.id !== row.id),
     }));
     pushToast(`已删除历史记录：${summarizeTitle(row.title)}`, 'info');
+  }
+
+  // Remove a row from the current queue. If it is still downloading, stop the
+  // backend task first; ignore its later events so it can't reappear.
+  async function handleRemoveCurrentRow(row: DownloadRow) {
+    if (isActiveStatus(row.status)) {
+      try {
+        await cancelDownload(row.id);
+      } catch {
+        // Task may already have ended; removing the row is still fine.
+      }
+    }
+    dismissedDownloadIds.current.add(row.id);
+    notifiedDownloadIds.current.add(row.id);
+    setDownloadState((current) => ({
+      ...current,
+      current: current.current.filter((item) => item.id !== row.id),
+    }));
+    pushToast(`已移除：${summarizeTitle(row.title)}`, 'info');
   }
 
   async function handleOpenLocation(row: DownloadRow) {
@@ -757,10 +795,11 @@ export default function App() {
             <DownloadsTable
               mode="current"
               ariaLabel="当前下载队列"
-              emptyText="解析新视频后，这里只展示当前流程的下载任务。"
+              emptyText="解析视频并选择清晰度后，下载任务会出现在这里。"
               rows={downloadState.current}
               onOpenLocation={handleOpenLocation}
               onCancel={handleCancelDownload}
+              onDelete={handleRemoveCurrentRow}
             />
           ) : (
             <DownloadsTable

@@ -795,19 +795,140 @@ body::before {
   border-color: var(--accent);
 }
 
-.downloads-table {
-  width: 100%;
+/* ----------------------------------------------------- downloads list
+
+   Custom rows (not a fixed-grid table) so long titles can wrap and the row
+   adapts to width instead of truncating every column to ellipsis. */
+.dl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
 }
 
-.table-actions {
+.dl-empty {
+  padding: 22px 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 13px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  text-align: center;
+}
+
+.dl-row {
   display: flex;
-  gap: 6px;
-  flex-wrap: nowrap;
   align-items: center;
+  gap: 16px;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-sm);
 }
 
-/* Keep action buttons on a single line so the fixed-height row never clips. */
-.table-actions > * {
+.dl-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.dl-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  /* Wrap up to two lines, then ellipsis — far more legible than one cell. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.dl-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.dl-status {
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.dl-status.tone-active { color: var(--accent-deep); }
+.dl-status.tone-done { color: #2f7049; }
+.dl-status.tone-failed { color: #a8330f; }
+
+/* Dot separator before each trailing meta chip. */
+.dl-meta-sep {
+  position: relative;
+  padding-left: 11px;
+}
+
+.dl-meta-sep::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--ink-faint);
+}
+
+.dl-progress {
+  flex: 0 0 auto;
+  width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.dl-bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--paper-sunk);
+  overflow: hidden;
+}
+
+.dl-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.dl-row.tone-done .dl-bar-fill { background: #3a8a57; }
+.dl-row.tone-failed .dl-bar-fill { background: #c2402a; }
+
+.dl-pct {
+  flex: 0 0 auto;
+  min-width: 42px;
+  text-align: right;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+}
+
+.dl-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dl-actions > * {
   flex: 0 0 auto;
   white-space: nowrap;
 }
@@ -849,11 +970,6 @@ body::before {
   outline-offset: 2px;
 }
 
-/* Keep Spectrum's collection components from collapsing to intrinsic width. */
-.downloads-table > *,
-.downloads-table [role="grid"] {
-  width: 100% !important;
-}
 
 /* ------------------------------------------------------------- preview */
 
