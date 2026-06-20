@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev"
+    "tauri:dev": "tauri dev",
+    "setup:ffmpeg": "node scripts/setup-ffmpeg.mjs",
+    "postinstall": "node scripts/setup-ffmpeg.mjs"
   },
   "dependencies": {
     "@react-spectrum/s2": "^1.5.0",
@@ -22,6 +24,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "ffmpeg-static": "^5.2.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }

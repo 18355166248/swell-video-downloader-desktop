@@ -1,9 +1,10 @@
-import { Button, Heading, InlineAlert, Text } from '@react-spectrum/s2';
+import { Button, InlineAlert, Text } from '@react-spectrum/s2';
 import { useEffect, useRef, useState } from 'react';
+import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
 import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
+import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
-import { ResultCard } from './features/resolve/ResultCard';
 import { SettingsPanel } from './features/settings/SettingsPanel';
 import {
   listenDownloadError,
@@ -39,6 +40,13 @@ type DownloadTab = 'current' | 'history';
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
+
+const HERO_STEPS = [
+  { id: 1, label: '解析地址' },
+  { id: 2, label: '选择版本' },
+  { id: 3, label: '下载队列' },
+  { id: 4, label: '设置' },
+] as const;
 
 function loadStoredHistory(): DownloadRow[] {
   if (typeof window === 'undefined') {
@@ -152,6 +160,33 @@ function parseBatchUrls(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
+// Front-end gate so garbage input never reaches the resolver. Accepts bare hosts
+// like "x.com/..." by assuming https, and returns the normalized URL (or null).
+function normalizeVideoUrl(raw: string): string | null {
+  const value = raw.trim();
+  if (!value) {
+    return null;
+  }
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//iu.test(value);
+  let parsed: URL;
+  try {
+    parsed = new URL(hasScheme ? value : `https://${value}`);
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null;
+  }
+  // Reject hosts without a dotted domain (e.g. "asdf", "localhost typo").
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/iu.test(parsed.hostname)) {
+    return null;
+  }
+
+  return parsed.toString();
+}
+
 function summarizeTitle(title: string, maxLength = 36): string {
   if (title.length <= maxLength) {
     return title;
@@ -159,13 +194,13 @@ function summarizeTitle(title: string, maxLength = 36): string {
   return `${title.slice(0, maxLength - 1)}…`;
 }
 
+
 export default function App() {
-  const [url, setUrl] = useState('');
-  const [batchUrls, setBatchUrls] = useState('');
-  const [resolved, setResolved] = useState<ResolveMediaResponse | null>(null);
+  const [urls, setUrls] = useState('');
+  const [resolvedItems, setResolvedItems] = useState<ResolveItem[]>([]);
+  const [expandedUrl, setExpandedUrl] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [isResolving, setIsResolving] = useState(false);
-  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
   const [downloadState, setDownloadState] = useState<DownloadBucketState>({
     current: [],
     history: loadStoredHistory(),
@@ -180,12 +215,12 @@ export default function App() {
   const [selectedCookieSource, setSelectedCookieSource] = useState('chrome');
   const [cookieFilePath, setCookieFilePath] = useState('');
   const [dependencyStatus, setDependencyStatus] = useState<DependencyStatus | null>(null);
-  const [thumbnail, setThumbnail] = useState<string | null>(null);
-  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
-  const [currentSessionLabel, setCurrentSessionLabel] = useState('本次解析');
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
+  // Monotonic token identifying the active resolve run. Bumping it cancels the
+  // in-flight run: stale awaits see a mismatch and bail without touching state.
+  const resolveSessionRef = useRef(0);
 
   function dismissToast(id: string) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -333,11 +368,30 @@ export default function App() {
     };
   }, []);
 
-  async function loadPreview(trimmedUrl: string, result: ResolveMediaResponse) {
+  function patchResolvedItem(itemUrl: string, patch: Partial<ResolveItem>) {
+    setResolvedItems((items) =>
+      items.map((item) => (item.url === itemUrl ? { ...item, ...patch } : item)),
+    );
+  }
+
+  // Format ids are only unique within one video, so downloads are tracked under
+  // a `url::formatId` key. Each card gets the bare ids scoped to its own url.
+  function scopedDownloadingIds(itemUrl: string): Set<string> {
+    const prefix = `${itemUrl}::`;
+    const scoped = new Set<string>();
+    for (const key of downloadingIds) {
+      if (key.startsWith(prefix)) {
+        scoped.add(key.slice(prefix.length));
+      }
+    }
+    return scoped;
+  }
+
+  async function loadPreview(itemUrl: string, result: ResolveMediaResponse) {
     // yt-dlp paths come with a poster URL already; only the ssstwitter fallback
     // needs an ffmpeg-generated frame. Use the smallest variant for speed.
     if (result.thumbnail) {
-      setThumbnail(result.thumbnail);
+      patchResolvedItem(itemUrl, { thumbnail: result.thumbnail });
       return;
     }
 
@@ -346,57 +400,144 @@ export default function App() {
       return;
     }
 
-    setIsPreviewLoading(true);
+    patchResolvedItem(itemUrl, { isPreviewLoading: true });
     try {
-      const dataUrl = await generatePreview(trimmedUrl, previewFormat.id);
-      setThumbnail(dataUrl);
+      const dataUrl = await generatePreview(itemUrl, previewFormat.id);
+      patchResolvedItem(itemUrl, { thumbnail: dataUrl, isPreviewLoading: false });
     } catch {
-      setThumbnail(null);
-    } finally {
-      setIsPreviewLoading(false);
+      patchResolvedItem(itemUrl, { thumbnail: null, isPreviewLoading: false });
     }
   }
 
-  async function handleResolve() {
-    const trimmedUrl = url.trim();
-    if (!trimmedUrl) {
-      setResolved(null);
+  function handleSubmit() {
+    // Pressing again while resolving cancels the run.
+    if (isResolving) {
+      resolveSessionRef.current += 1;
+      setIsResolving(false);
+      // Drop the rows that never finished resolving; keep ready/failed ones.
+      setResolvedItems((items) => items.filter((item) => item.status !== 'loading'));
+      pushToast('已取消解析。', 'info');
+      return;
+    }
+
+    const lines = parseBatchUrls(urls);
+    if (lines.length === 0) {
       reportError('请先输入视频地址。');
       return;
     }
 
-    setIsResolving(true);
-    setError('');
-    setThumbnail(null);
-    setResolved(null);
-    setDownloadTab('current');
-    setDownloadingIds(new Set());
-    if (downloadState.current.length > 0) {
-      pushToast('已开始新的下载会话，当前队列已清空。', 'info');
+    const valid: string[] = [];
+    const invalid: string[] = [];
+    for (const line of lines) {
+      const normalized = normalizeVideoUrl(line);
+      if (normalized) {
+        valid.push(normalized);
+      } else {
+        invalid.push(line);
+      }
     }
-    setDownloadState((current) => archiveCurrentRows(current));
 
-    try {
-      const result = await resolveMedia(trimmedUrl, selectedCookieSource, cookieFilePath);
-      setResolved(result);
-      setCurrentSessionLabel(deriveSessionLabel(trimmedUrl, result));
-      pushToast(`解析成功：发现 ${result.formats.length} 个可下载版本`, 'success');
-      void loadPreview(trimmedUrl, result);
-    } catch (err) {
-      setResolved(null);
-      reportError(err instanceof Error ? err.message : '解析失败');
-    } finally {
-      setIsResolving(false);
-    }
-  }
-
-  async function handleDownloadFormat(format: MediaFormat) {
-    const trimmedUrl = url.trim();
-    if (!trimmedUrl || !resolved) {
+    // Any bad line blocks the whole run so the user fixes it before resolving.
+    if (invalid.length > 0) {
+      reportError(`以下不是有效的视频地址，请检查后重试：${invalid.join('；')}`);
       return;
     }
 
-    await enqueueDownload(trimmedUrl, resolved, format, currentSessionLabel, true);
+    void handleResolveAll(Array.from(new Set(valid)));
+  }
+
+  // Resolve one or many links, then let the user pick a quality per video.
+  // Cards stream in as each link resolves so a slow link can't block the rest.
+  async function handleResolveAll(targetUrls: string[]) {
+    const session = (resolveSessionRef.current += 1);
+    const isActive = () => resolveSessionRef.current === session;
+
+    setIsResolving(true);
+    setError('');
+    setExpandedUrl(null);
+    setDownloadingIds(new Set());
+    setDownloadTab('current');
+    // Seed a placeholder row per link so the whole batch shows up immediately as
+    // "解析中", then each row flips to ready/failed as its resolve settles.
+    setResolvedItems(
+      targetUrls.map((targetUrl) => ({
+        url: targetUrl,
+        status: 'loading',
+        resolved: null,
+        thumbnail: null,
+        isPreviewLoading: false,
+      })),
+    );
+    if (downloadState.current.length > 0) {
+      pushToast('已开始新的解析会话，当前队列已清空。', 'info');
+    }
+    setDownloadState((current) => archiveCurrentRows(current));
+
+    let successCount = 0;
+    let lastFormatCount = 0;
+    const failures: string[] = [];
+
+    for (const targetUrl of targetUrls) {
+      if (!isActive()) {
+        return;
+      }
+      try {
+        const result = await resolveMedia(targetUrl, selectedCookieSource, cookieFilePath);
+        if (!isActive()) {
+          return;
+        }
+        patchResolvedItem(targetUrl, { status: 'ready', resolved: result });
+        // Auto-expand the first video that becomes ready.
+        setExpandedUrl((current) => current ?? targetUrl);
+        successCount += 1;
+        lastFormatCount = result.formats.length;
+        void loadPreview(targetUrl, result);
+      } catch (err) {
+        if (!isActive()) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : '解析失败';
+        patchResolvedItem(targetUrl, { status: 'failed', error: message });
+        failures.push(`${targetUrl}：${message}`);
+      }
+    }
+
+    if (!isActive()) {
+      return;
+    }
+
+    if (successCount > 0) {
+      pushToast(
+        successCount > 1
+          ? `解析完成：${successCount} 个视频，逐个选择清晰度后下载。`
+          : `解析成功：发现 ${lastFormatCount} 个版本，选择清晰度后下载。`,
+        'success',
+        4200,
+      );
+    }
+    if (failures.length > 0) {
+      reportError(`以下链接解析失败：${failures.join('；')}`);
+    }
+    setIsResolving(false);
+  }
+
+  async function handleDownload(item: ResolveItem, format: MediaFormat) {
+    if (!item.resolved) {
+      return;
+    }
+    const result = await enqueueDownload(
+      item.url,
+      item.resolved,
+      format,
+      deriveSessionLabel(item.url, item.resolved),
+      true,
+    );
+    if (result.ok) {
+      patchResolvedItem(item.url, {
+        status: 'selected',
+        selectedLabel: cleanFormatLabel(format.label),
+      });
+    }
   }
 
   async function enqueueDownload(
@@ -406,8 +547,9 @@ export default function App() {
     sessionLabel: string,
     notifyStart: boolean,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const downloadKey = `${targetUrl}::${format.id}`;
     setError('');
-    setDownloadingIds((current) => new Set(current).add(format.id));
+    setDownloadingIds((current) => new Set(current).add(downloadKey));
     try {
       const taskTitle = buildDownloadTitle(targetResolved.title, format);
       const taskId = await startDownload(
@@ -441,60 +583,10 @@ export default function App() {
     } finally {
       setDownloadingIds((current) => {
         const next = new Set(current);
-        next.delete(format.id);
+        next.delete(downloadKey);
         return next;
       });
     }
-  }
-
-  async function handleBatchDownload() {
-    const urls = parseBatchUrls(batchUrls);
-    if (urls.length === 0) {
-      reportError('请先粘贴要批量下载的链接，每行一个。');
-      return;
-    }
-
-    setIsBatchDownloading(true);
-    setError('');
-    setDownloadTab('current');
-    if (downloadState.current.length > 0) {
-      pushToast('已开始新的批量下载会话，当前队列已清空。', 'info');
-    }
-    setDownloadState((current) => archiveCurrentRows(current));
-
-    let successCount = 0;
-    const failures: string[] = [];
-
-    for (const targetUrl of urls) {
-      try {
-        const result = await resolveMedia(targetUrl, selectedCookieSource, cookieFilePath);
-        const started = await enqueueDownload(
-          targetUrl,
-          result,
-          result.recommendation,
-          deriveSessionLabel(targetUrl, result),
-          false,
-        );
-        if (started.ok) {
-          successCount += 1;
-        } else {
-          failures.push(`${targetUrl}：${started.message}`);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : '批量下载任务解析失败';
-        failures.push(`${targetUrl}：${message}`);
-      }
-    }
-
-    if (successCount > 0) {
-      pushToast(`批量任务已加入队列：${successCount} 个链接。`, 'success', 4200);
-    }
-    if (failures.length > 0) {
-      reportError(`以下链接处理失败：${failures.join('；')}`);
-    } else {
-      setBatchUrls('');
-    }
-    setIsBatchDownloading(false);
   }
 
   async function handleCancelDownload(row: DownloadRow) {
@@ -573,42 +665,54 @@ export default function App() {
     }
   }
 
+  const activeStep = resolvedItems.length > 0
+    ? 2
+    : downloadState.current.length > 0
+      ? 3
+      : 1;
+
   return (
     <main className="app-shell">
+      <TitleBar />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      <section className="hero-block">
-        <Text UNSAFE_className="eyebrow">桌面主线项目</Text>
-        <Heading level={1} UNSAFE_className="hero-title">
-          Swell <em>Video</em> Downloader
-        </Heading>
-        <Text UNSAFE_className="hero-sub">
-          输入视频页 URL，先解析查看预览与各清晰度大小，再自行选择要下载的版本。
-        </Text>
-      </section>
 
       <div className="flow">
-        <section className="flow-step" data-step="01" aria-label="解析">
+        <section className="flow-step intro-step" data-step="01" aria-label="解析">
           <ResolvePanel
-            url={url}
-            batchUrls={batchUrls}
+            urls={urls}
+            urlCount={parseBatchUrls(urls).length}
             isResolving={isResolving}
-            isBatchDownloading={isBatchDownloading}
-            onUrlChange={setUrl}
-            onBatchUrlsChange={setBatchUrls}
-            onResolve={handleResolve}
-            onBatchDownload={handleBatchDownload}
+            onUrlsChange={setUrls}
+            onSubmit={handleSubmit}
           />
+          <ol className="flow-progress" aria-label="操作流程">
+            {HERO_STEPS.map((step) => {
+              const state =
+                step.id < activeStep ? 'is-done' : step.id === activeStep ? 'is-active' : '';
+              return (
+                <li key={step.id} className={`flow-progress-step ${state}`.trim()}>
+                  <span className="num">{step.id}</span>
+                  <span className="lbl">{step.label}</span>
+                </li>
+              );
+            })}
+          </ol>
           {error ? <InlineAlert variant="negative">{error}</InlineAlert> : null}
         </section>
 
-        {resolved ? (
+        {resolvedItems.length > 0 ? (
           <section className="flow-step" data-step="02" aria-label="选择版本">
-            <ResultCard
-              resolved={resolved}
-              thumbnail={thumbnail}
-              isPreviewLoading={isPreviewLoading}
-              downloadingIds={downloadingIds}
-              onDownload={handleDownloadFormat}
+            {resolvedItems.length > 1 ? (
+              <Text UNSAFE_className="section-kicker">
+                共 {resolvedItems.length} 个视频 · 展开任意一个选择清晰度后下载
+              </Text>
+            ) : null}
+            <ResolveBoard
+              items={resolvedItems}
+              openUrl={expandedUrl}
+              downloadingIdsFor={scopedDownloadingIds}
+              onOpenChange={setExpandedUrl}
+              onDownload={(item, format) => void handleDownload(item, format)}
             />
           </section>
         ) : null}

@@ -64,7 +64,7 @@ body::before {
 
 .toast-stack {
   position: fixed;
-  top: 22px;
+  top: 56px;
   right: 22px;
   z-index: 30;
   display: grid;
@@ -128,74 +128,263 @@ body::before {
   outline-offset: 2px;
 }
 
-/* ----------------------------------------------------------- shell + hero */
+/* ------------------------------------------------------ shell + titlebar */
 
 .app-shell {
   width: min(880px, calc(100vw - 80px));
   margin: 0 auto;
-  padding: 72px 0 96px;
+  padding: 80px 0 96px;
 }
 
-.hero-block {
-  display: grid;
-  gap: 14px;
-  margin-bottom: 52px;
-  padding-bottom: 32px;
-  border-bottom: 1px solid var(--line);
-  position: relative;
-  animation: rise-in 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-
-/* Hairline accent tick anchoring the eyebrow to the baseline rule. */
-.hero-block::after {
-  content: "";
-  position: absolute;
+/* Custom window chrome — replaces the OS titlebar (decorations: false). */
+.titlebar {
+  position: fixed;
+  top: 0;
   left: 0;
-  bottom: -1px;
-  width: 64px;
-  height: 2px;
-  background: var(--accent);
+  right: 0;
+  height: 44px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  background: linear-gradient(180deg, rgba(241, 235, 221, 0.92), rgba(241, 235, 221, 0.62));
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(14px);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.eyebrow {
+.titlebar-brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--accent-deep);
+  gap: 11px;
+  pointer-events: none;
 }
 
-.eyebrow::before {
-  content: "";
-  width: 22px;
-  height: 1px;
-  background: currentColor;
-  opacity: 0.6;
+.titlebar-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
 }
 
-.app-shell .hero-title {
-  font-family: var(--font-display) !important;
-  font-weight: 500 !important;
-  font-size: clamp(40px, 5vw, 60px) !important;
-  line-height: 1.02 !important;
-  letter-spacing: -0.02em !important;
-  color: var(--ink) !important;
-  margin: 4px 0 0 !important;
+.win-btn {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.app-shell .hero-title em {
+.win-btn svg {
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.win-btn:hover {
+  background: rgba(33, 29, 24, 0.07);
+  color: var(--ink);
+}
+
+.win-btn-close:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.win-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Invisible resize grips around the window edges. */
+.resize-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+}
+
+.resize-handle {
+  position: fixed;
+  pointer-events: auto;
+}
+
+.resize-n { top: 0; left: 6px; right: 6px; height: 5px; cursor: ns-resize; }
+.resize-s { bottom: 0; left: 6px; right: 6px; height: 5px; cursor: ns-resize; }
+.resize-e { top: 6px; bottom: 6px; right: 0; width: 5px; cursor: ew-resize; }
+.resize-w { top: 6px; bottom: 6px; left: 0; width: 5px; cursor: ew-resize; }
+.resize-ne { top: 0; right: 0; width: 9px; height: 9px; cursor: nesw-resize; }
+.resize-nw { top: 0; left: 0; width: 9px; height: 9px; cursor: nwse-resize; }
+.resize-se { bottom: 0; right: 0; width: 9px; height: 9px; cursor: nwse-resize; }
+.resize-sw { bottom: 0; left: 0; width: 9px; height: 9px; cursor: nesw-resize; }
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.brand-name em {
   font-style: italic;
   color: var(--accent);
 }
 
-.hero-sub {
-  max-width: 60ch;
-  font-size: 15.5px;
-  line-height: 1.65;
+/* ----------------------------------------------------- intro / input card */
+
+.paper-card.intro-card {
+  display: grid;
+  gap: 18px;
+  padding: 26px 30px 28px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Soft accent glow in the corner of the lead card. */
+.intro-card::before {
+  content: "";
+  position: absolute;
+  top: -60px;
+  right: -40px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, var(--accent-wash), transparent 70%);
+  pointer-events: none;
+}
+
+.intro-head {
+  display: grid;
+  gap: 8px;
+}
+
+.intro-tagline {
+  max-width: 56ch;
+  font-size: 14px;
+  line-height: 1.6;
   color: var(--ink-soft);
+}
+
+.intro-input-wrap {
+  position: relative;
+  display: block;
+}
+
+.intro-textarea {
+  min-height: 104px;
+  font-size: 14.5px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.intro-input-count {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper-raised);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+.intro-actions {
+  justify-content: flex-end;
+}
+
+/* ------------------------------------------------ horizontal progress flow */
+
+.flow-progress {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+
+.flow-progress-step {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-faint);
+  transition: color 0.18s ease;
+}
+
+/* Hairline connector trailing each step except the last. */
+.flow-progress-step:not(:last-child)::after {
+  content: "";
+  width: 18px;
+  height: 1px;
+  margin-left: 9px;
+  background: var(--line-strong);
+}
+
+.flow-progress-step .num {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--paper-raised);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.flow-progress-step .lbl {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.flow-progress-step.is-active {
+  color: var(--ink);
+}
+
+.flow-progress-step.is-active .num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.flow-progress-step.is-done {
+  color: var(--ink-soft);
+}
+
+.flow-progress-step.is-done .num {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper-raised);
 }
 
 /* --------------------------------------------------- single-column flow */
@@ -275,6 +464,7 @@ body::before {
 
 .action-row {
   display: flex;
+  align-items: center;
   gap: 12px;
   flex-wrap: wrap;
 }
@@ -309,6 +499,249 @@ body::before {
 .resolve-card {
   display: grid;
   gap: 18px;
+}
+
+/* ------------------------------------------------ resolve board (grid + drawer)
+
+   Each video is a compact tile in a wrapping grid, so any number of links stays
+   short. Clicking a tile slides in a drawer to pick the quality. */
+.resolve-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.resolve-entry {
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-sm);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.resolve-entry:not(:disabled):hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+}
+
+.resolve-entry.is-open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-md);
+}
+
+.resolve-entry.is-selected {
+  border-color: rgba(55, 128, 83, 0.45);
+}
+
+.resolve-entry.is-loading {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.resolve-entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.resolve-entry-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resolve-entry-index {
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-faint);
+}
+
+.resolve-entry-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resolve-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--ink-faint);
+}
+
+.resolve-dot.dot-loading {
+  animation: dot-pulse 1.1s ease-in-out infinite;
+}
+
+.resolve-dot.dot-ready { background: var(--accent); }
+.resolve-dot.dot-selected { background: #3a8a57; }
+.resolve-dot.dot-failed { background: #c2402a; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* Status pill, shared by tiles and the drawer header. */
+.resolve-entry-status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  background: var(--paper);
+  white-space: nowrap;
+}
+
+.resolve-entry-status.badge-ready {
+  color: var(--accent-deep);
+  border-color: rgba(210, 67, 32, 0.3);
+  background: var(--accent-wash);
+}
+
+.resolve-entry-status.badge-selected {
+  color: #2f7049;
+  border-color: rgba(55, 128, 83, 0.32);
+  background: rgba(55, 128, 83, 0.1);
+}
+
+.resolve-entry-status.badge-failed {
+  color: #a8330f;
+  border-color: rgba(194, 64, 42, 0.32);
+  background: rgba(194, 64, 42, 0.08);
+}
+
+/* ---- drawer ---- */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: rgba(33, 29, 24, 0.34);
+  backdrop-filter: blur(2px);
+  animation: fade-in 0.2s ease both;
+}
+
+.drawer {
+  position: fixed;
+  top: 44px;
+  right: 0;
+  bottom: 0;
+  z-index: 36;
+  width: min(440px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--paper-raised);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -18px 0 48px rgba(33, 29, 24, 0.18);
+  animation: drawer-in 0.26s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes drawer-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer-head-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.app-shell .drawer-title {
+  font-family: var(--font-display) !important;
+  font-size: 18px !important;
+  font-weight: 500 !important;
+  line-height: 1.3 !important;
+  color: var(--ink) !important;
+}
+
+.drawer-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.drawer-nav-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  min-width: 38px;
+  text-align: center;
+}
+
+.drawer-nav-btn,
+.drawer-close {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.drawer-nav-btn:not(:disabled):hover,
+.drawer-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.drawer-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 18px 20px 24px;
+}
+
+.drawer-body .preview-frame {
+  margin-top: 0;
+}
+
+.resolve-error {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #a8330f;
 }
 
 .batch-panel {
@@ -368,8 +801,15 @@ body::before {
 
 .table-actions {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+/* Keep action buttons on a single line so the fixed-height row never clips. */
+.table-actions > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .download-tabs {

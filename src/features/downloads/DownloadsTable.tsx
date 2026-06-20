@@ -58,12 +58,12 @@ export function DownloadsTable({
     <div className="downloads-table">
       <TableView aria-label={ariaLabel}>
         <TableHeader>
-          <Column key="title" isRowHeader>标题</Column>
-          <Column key="session">来源</Column>
-          <Column key="status">状态</Column>
-          <Column key="progress">进度</Column>
-          <Column key="speed">速度</Column>
-          <Column key="actions">操作</Column>
+          <Column key="title" isRowHeader minWidth={150}>标题</Column>
+          <Column key="session" width={100}>来源</Column>
+          <Column key="status" width={84}>状态</Column>
+          <Column key="progress" width={76}>进度</Column>
+          <Column key="speed" width={96}>速度</Column>
+          <Column key="actions" width={190}>操作</Column>
         </TableHeader>
         <TableBody>
           {rows.length === 0 ? (
@@ -85,17 +85,20 @@ export function DownloadsTable({
                 <Cell>{row.speed ?? '--'}</Cell>
                 <Cell>
                   <div className="table-actions">
-                    <ActionButton onPress={() => onOpenLocation(row)}>
-                      {row.outputPath ? '打开所在文件夹' : '打开下载目录'}
+                    <ActionButton
+                      aria-label={row.outputPath ? '打开所在文件夹' : '打开下载目录'}
+                      onPress={() => onOpenLocation(row)}
+                    >
+                      {row.outputPath ? '打开文件夹' : '打开目录'}
                     </ActionButton>
                     {mode === 'current' && onCancel && canCancel(row.status) ? (
-                      <ActionButton onPress={() => onCancel(row)}>
-                        取消下载
+                      <ActionButton aria-label="取消下载" onPress={() => onCancel(row)}>
+                        取消
                       </ActionButton>
                     ) : null}
                     {mode === 'history' && onDelete ? (
-                      <ActionButton onPress={() => onDelete(row)}>
-                        删除记录
+                      <ActionButton aria-label="删除记录" onPress={() => onDelete(row)}>
+                        删除
                       </ActionButton>
                     ) : null}
                   </div>
