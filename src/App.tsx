@@ -405,7 +405,7 @@ export default function App() {
     format: MediaFormat,
     sessionLabel: string,
     notifyStart: boolean,
-  ): Promise<boolean> {
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
     setError('');
     setDownloadingIds((current) => new Set(current).add(format.id));
     try {
@@ -433,10 +433,11 @@ export default function App() {
       if (notifyStart) {
         pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
       }
-      return true;
+      return { ok: true };
     } catch (err) {
-      reportError(err instanceof Error ? err.message : '创建下载任务失败');
-      return false;
+      const message = err instanceof Error ? err.message : '创建下载任务失败';
+      reportError(message);
+      return { ok: false, message };
     } finally {
       setDownloadingIds((current) => {
         const next = new Set(current);
@@ -474,10 +475,10 @@ export default function App() {
           deriveSessionLabel(targetUrl, result),
           false,
         );
-        if (started) {
+        if (started.ok) {
           successCount += 1;
         } else {
-          failures.push(`${targetUrl}：创建下载任务失败`);
+          failures.push(`${targetUrl}：${started.message}`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : '批量下载任务解析失败';

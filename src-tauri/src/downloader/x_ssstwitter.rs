@@ -1,7 +1,9 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -43,6 +45,13 @@ pub struct SssTwitterFormat {
 pub struct SssTwitterSelection {
     pub label: String,
     pub direct_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EncodedSssTwitterSelection {
+    label: String,
+    #[serde(default)]
+    direct_url: Option<String>,
 }
 
 /// Field separator embedded in a selection id (ASCII unit separator) — it never
@@ -102,18 +111,49 @@ fn fill_sizes(client: &Client, formats: &mut [SssTwitterFormat]) {
 }
 
 pub fn create_ssstwitter_selection_id(label: &str, direct_url: Option<&str>) -> String {
-    match direct_url.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(url) => format!(
-            "{SSSTWITTER_SELECTION_PREFIX}{}{SELECTION_FIELD_SEPARATOR}{}",
-            label.trim(),
-            url
-        ),
-        None => format!("{SSSTWITTER_SELECTION_PREFIX}{}", label.trim()),
-    }
+    let payload = EncodedSssTwitterSelection {
+        label: label.trim().to_string(),
+        direct_url: direct_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    };
+    let json = serde_json::to_vec(&payload).unwrap_or_else(|_| {
+        match payload.direct_url.as_deref() {
+            Some(url) => format!(
+                "{}{}{SELECTION_FIELD_SEPARATOR}{}",
+                SSSTWITTER_SELECTION_PREFIX, payload.label, url
+            )
+            .into_bytes(),
+            None => format!("{SSSTWITTER_SELECTION_PREFIX}{}", payload.label).into_bytes(),
+        }
+    });
+    format!(
+        "{SSSTWITTER_SELECTION_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(json)
+    )
 }
 
 pub fn extract_ssstwitter_selection(selection_id: &str) -> Option<SssTwitterSelection> {
     let body = selection_id.strip_prefix(SSSTWITTER_SELECTION_PREFIX)?;
+    if let Ok(decoded) = URL_SAFE_NO_PAD.decode(body) {
+        if let Ok(payload) = serde_json::from_slice::<EncodedSssTwitterSelection>(&decoded) {
+            let label = payload.label.trim();
+            if label.is_empty() {
+                return None;
+            }
+            return Some(SssTwitterSelection {
+                label: label.to_string(),
+                direct_url: payload
+                    .direct_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| value.starts_with("https://"))
+                    .map(str::to_string),
+            });
+        }
+    }
+
     let mut parts = body.splitn(2, SELECTION_FIELD_SEPARATOR);
     let label = parts.next()?.trim();
     if label.is_empty() {
@@ -633,6 +673,19 @@ mod tests {
         assert_eq!(selection.direct_url, None);
     }
 
+    #[test]
+    fn creates_transport_safe_selection_ids() {
+        let selection_id = create_ssstwitter_selection_id(
+            "下载 HD 1080x1080",
+            Some("https://ssscdn.io/ssstwitter/2066861838516564280/abc?st=x&e=1"),
+        );
+
+        assert!(
+            !selection_id.chars().any(|character| character.is_control()),
+            "selection ids should avoid control characters so they are safe to pass through UI state and IPC"
+        );
+    }
+
     const RESULT_WITH_ADS_SNIPPET: &str = r##"
         <div class="result-container" id="result_buttons">
             <a href="https://play.google.com/store/apps/details?id=com.fget.facebook.video.downloader.twitter.saver&utm_source=ssstw&utm_medium=header"
@@ -718,4 +771,5 @@ mod tests {
 
         let _ = fs::remove_file(output_path);
     }
+
 }

@@ -71,7 +71,16 @@ pub fn start_download(
     cookie_source: Option<String>,
     cookie_file_path: Option<String>,
 ) -> Result<String, String> {
+    eprintln!(
+        "[start_download] url={url} format_id={:?} title={:?} cookie_source={:?} cookie_file_path={:?} requires_binary_toolchain={}",
+        format_id,
+        title,
+        cookie_source,
+        cookie_file_path,
+        requires_binary_toolchain(&url, format_id.as_deref())
+    );
     if url.trim().is_empty() {
+        eprintln!("[start_download] rejected empty url");
         return Err("下载地址不能为空".into());
     }
 
@@ -91,14 +100,7 @@ pub fn start_download(
     );
 
     let download_dir = resolve_download_dir(&app)?;
-    let yt_dlp = resolve_yt_dlp(&app).ok_or_else(|| {
-        "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。"
-            .to_string()
-    })?;
-    let ffmpeg = resolve_ffmpeg(&app).ok_or_else(|| {
-        "未找到 ffmpeg。请将其放到 resources/bin 目录，或通过 SWELL_FFMPEG_PATH 指定路径。"
-            .to_string()
-    })?;
+    eprintln!("[start_download] resolved download_dir={}", download_dir.display());
 
     let app_handle = app.clone();
     let return_task_id = task_id.clone();
@@ -107,6 +109,7 @@ pub fn start_download(
         task_title.clone(),
         cancel_requested.clone(),
     )?;
+    eprintln!("[start_download] registered task_id={task_id} title={task_title}");
     thread::spawn(move || {
         let result = run_download_task(
             app_handle.clone(),
@@ -116,13 +119,12 @@ pub fn start_download(
             format_id,
             cookie_source,
             cookie_file_path,
-            yt_dlp.path,
-            ffmpeg.path,
             download_dir,
             cancel_requested,
         );
         unregister_download_task(&task_id);
         if let Err(message) = result {
+            eprintln!("[start_download] task_id={task_id} failed: {message}");
             if message == "下载已取消" {
                 emit_status(
                     &app_handle,
@@ -212,15 +214,22 @@ fn run_download_task(
     format_id: Option<String>,
     cookie_source: Option<String>,
     cookie_file_path: Option<String>,
-    yt_dlp_path: PathBuf,
-    ffmpeg_path: PathBuf,
     download_dir: PathBuf,
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    eprintln!(
+        "[run_download_task] task_id={task_id} url={url} format_id={:?} title={title}",
+        format_id
+    );
     fs::create_dir_all(&download_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
     if url.contains("x.com") {
         if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
+            eprintln!(
+                "[run_download_task] task_id={task_id} using ssstwitter selection label={} direct_url_present={}",
+                selection.label,
+                selection.direct_url.is_some()
+            );
             return run_ssstwitter_download_task(
                 app,
                 task_id,
@@ -231,9 +240,23 @@ fn run_download_task(
                 cancel_requested,
             );
         }
+        eprintln!("[run_download_task] task_id={task_id} x.com url but no ssstwitter selection decoded");
     }
 
-    let mut command = Command::new(&yt_dlp_path);
+    let yt_dlp = resolve_yt_dlp(&app).ok_or_else(|| {
+        eprintln!("[run_download_task] task_id={task_id} yt-dlp not found");
+        "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。"
+            .to_string()
+    })?;
+    eprintln!("[run_download_task] task_id={task_id} yt_dlp={}", yt_dlp.path.display());
+    let ffmpeg = resolve_ffmpeg(&app).ok_or_else(|| {
+        eprintln!("[run_download_task] task_id={task_id} ffmpeg not found");
+        "未找到 ffmpeg。请将其放到 resources/bin 目录，或通过 SWELL_FFMPEG_PATH 指定路径。"
+            .to_string()
+    })?;
+    eprintln!("[run_download_task] task_id={task_id} ffmpeg={}", ffmpeg.path.display());
+
+    let mut command = Command::new(&yt_dlp.path);
     command.arg("--newline");
     command.arg("--progress-template");
     command.arg("download:__PROGRESS__:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s");
@@ -258,7 +281,7 @@ fn run_download_task(
         cookie_file_path.as_deref(),
     )?;
 
-    if let Some(parent_dir) = ffmpeg_path.parent() {
+    if let Some(parent_dir) = ffmpeg.path.parent() {
         command.arg("--ffmpeg-location");
         command.arg(parent_dir);
     }
@@ -269,7 +292,10 @@ fn run_download_task(
 
     let mut child = command
         .spawn()
-        .map_err(|err| format!("启动下载任务失败：{err}"))?;
+        .map_err(|err| {
+            eprintln!("[run_download_task] task_id={task_id} failed to spawn yt-dlp: {err}");
+            format!("启动下载任务失败：{err}")
+        })?;
 
     emit_status(
         &app,
@@ -533,6 +559,10 @@ fn run_ssstwitter_download_task(
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let selection_label = selection.label.as_str();
+    eprintln!(
+        "[run_ssstwitter_download_task] task_id={task_id} selection_label={selection_label} direct_url_present={}",
+        selection.direct_url.is_some()
+    );
     let file_title = compose_download_title(&title, Some(selection_label));
     emit_status(
         &app,
@@ -750,6 +780,13 @@ fn direct_download_url(format_id: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn requires_binary_toolchain(url: &str, format_id: Option<&str>) -> bool {
+    !(url.contains("x.com")
+        && format_id
+            .and_then(extract_ssstwitter_selection)
+            .is_some())
+}
+
 fn compose_download_title(base_title: &str, format_label: Option<&str>) -> String {
     let base = base_title.trim();
     let descriptor = format_label.and_then(clean_format_descriptor);
@@ -849,8 +886,9 @@ fn sanitize_filename(value: &str) -> String {
 mod tests {
     use super::{
         clean_format_descriptor, compose_download_title, direct_download_url,
-        effective_download_dir, extract_ssstwitter_selection, format_eta, sanitize_filename,
-        staging_path_for, with_ssstwitter_download_slot,
+        effective_download_dir, extract_ssstwitter_selection, format_eta,
+        requires_binary_toolchain, sanitize_filename, staging_path_for,
+        with_ssstwitter_download_slot,
     };
     use std::{
         path::{Path, PathBuf},
@@ -886,6 +924,18 @@ mod tests {
             .expect("selection should decode");
         assert_eq!(selection.label, "下载 HD 1080x1080");
         assert_eq!(selection.direct_url, None);
+    }
+
+    #[test]
+    fn skips_binary_toolchain_for_x_ssstwitter_downloads() {
+        assert!(!requires_binary_toolchain(
+            "https://x.com/4Brazzerlive/status/2068062512831255010/video/1",
+            Some("ssstwitter:eyJsYWJlbCI6IuS4i-i9vSBIRCAxMDgweDEwODAiLCJkaXJlY3RfdXJsIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQifQ")
+        ));
+        assert!(requires_binary_toolchain(
+            "https://www.pornhub.com/view_video.php?viewkey=abc123",
+            Some("best")
+        ));
     }
 
     #[test]
