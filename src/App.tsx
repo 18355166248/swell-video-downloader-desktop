@@ -1,5 +1,6 @@
 import { Button, Heading, InlineAlert, Text } from '@react-spectrum/s2';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { ToastStack, type ToastItem } from './components/ToastStack';
 import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
 import { ResultCard } from './features/resolve/ResultCard';
@@ -36,6 +37,7 @@ type DownloadBucketState = {
 type DownloadTab = 'current' | 'history';
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
+const TOAST_LIMIT = 4;
 
 function loadStoredHistory(): DownloadRow[] {
   if (typeof window === 'undefined') {
@@ -142,6 +144,13 @@ function buildDownloadTitle(baseTitle: string, format: MediaFormat): string {
   return baseTitle.includes(descriptor) ? baseTitle : `${baseTitle} - ${descriptor}`;
 }
 
+function summarizeTitle(title: string, maxLength = 36): string {
+  if (title.length <= maxLength) {
+    return title;
+  }
+  return `${title.slice(0, maxLength - 1)}…`;
+}
+
 export default function App() {
   const [url, setUrl] = useState('');
   const [resolved, setResolved] = useState<ResolveMediaResponse | null>(null);
@@ -165,6 +174,33 @@ export default function App() {
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [currentSessionLabel, setCurrentSessionLabel] = useState('本次解析');
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const notifiedDownloadIds = useRef<Set<string>>(new Set());
+
+  function dismissToast(id: string) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function pushToast(
+    message: string,
+    variant: ToastItem['variant'] = 'info',
+    durationMs?: number,
+  ) {
+    setToasts((current) => [
+      ...current.slice(-(TOAST_LIMIT - 1)),
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        message,
+        variant,
+        durationMs,
+      },
+    ]);
+  }
+
+  function reportError(message: string) {
+    setError(message);
+    pushToast(message, 'error', 4200);
+  }
 
   useEffect(() => {
     async function loadSettingsData() {
@@ -184,7 +220,7 @@ export default function App() {
     }
 
     loadSettingsData().catch((err) => {
-      setError(err instanceof Error ? err.message : '初始化设置数据失败');
+      reportError(err instanceof Error ? err.message : '初始化设置数据失败');
     });
   }, []);
 
@@ -221,6 +257,25 @@ export default function App() {
         );
       }),
       listenDownloadStatus((payload) => {
+        if (
+          (payload.status === 'completed' || payload.status === 'failed') &&
+          !notifiedDownloadIds.current.has(payload.task_id)
+        ) {
+          notifiedDownloadIds.current.add(payload.task_id);
+
+          if (payload.status === 'completed') {
+            pushToast(`下载完成：${summarizeTitle(payload.title)}`, 'success', 4200);
+          } else {
+            pushToast(
+              payload.message
+                ? `下载失败：${payload.message}`
+                : `下载失败：${summarizeTitle(payload.title)}`,
+              'error',
+              4800,
+            );
+          }
+        }
+
         setDownloadState((current) =>
           updateRowCollections(
             current,
@@ -246,7 +301,13 @@ export default function App() {
       }),
       listenDownloadError((payload) => {
         if (payload.message) {
-          setError(payload.message);
+          if (payload.task_id && notifiedDownloadIds.current.has(payload.task_id)) {
+            return;
+          }
+          if (payload.task_id) {
+            notifiedDownloadIds.current.add(payload.task_id);
+          }
+          reportError(payload.message);
         }
       }),
     ])
@@ -254,7 +315,7 @@ export default function App() {
         handlers.forEach((handler) => unlisteners.push(handler));
       })
       .catch((err) => {
-        setError(err instanceof Error ? err.message : '注册下载事件失败');
+        reportError(err instanceof Error ? err.message : '注册下载事件失败');
       });
 
     return () => {
@@ -290,7 +351,7 @@ export default function App() {
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
       setResolved(null);
-      setError('请先输入视频地址。');
+      reportError('请先输入视频地址。');
       return;
     }
 
@@ -300,16 +361,20 @@ export default function App() {
     setResolved(null);
     setDownloadTab('current');
     setDownloadingIds(new Set());
+    if (downloadState.current.length > 0) {
+      pushToast('已开始新的下载会话，当前队列已清空。', 'info');
+    }
     setDownloadState((current) => archiveCurrentRows(current));
 
     try {
       const result = await resolveMedia(trimmedUrl, selectedCookieSource, cookieFilePath);
       setResolved(result);
       setCurrentSessionLabel(deriveSessionLabel(trimmedUrl, result));
+      pushToast(`解析成功：发现 ${result.formats.length} 个可下载版本`, 'success');
       void loadPreview(trimmedUrl, result);
     } catch (err) {
       setResolved(null);
-      setError(err instanceof Error ? err.message : '解析失败');
+      reportError(err instanceof Error ? err.message : '解析失败');
     } finally {
       setIsResolving(false);
     }
@@ -345,8 +410,9 @@ export default function App() {
           ...current.current,
         ],
       }));
+      pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建下载任务失败');
+      reportError(err instanceof Error ? err.message : '创建下载任务失败');
     } finally {
       setDownloadingIds((current) => {
         const next = new Set(current);
@@ -360,7 +426,7 @@ export default function App() {
     try {
       await openDownloadLocation(downloadDir, row.outputPath);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '打开文件夹失败');
+      reportError(err instanceof Error ? err.message : '打开文件夹失败');
     }
   }
 
@@ -371,7 +437,7 @@ export default function App() {
     try {
       await openDownloadLocation(downloadDir);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '打开下载目录失败');
+      reportError(err instanceof Error ? err.message : '打开下载目录失败');
     }
   }
 
@@ -387,8 +453,9 @@ export default function App() {
         defaultDir: current?.defaultDir ?? nextDir,
         isCustom: true,
       }));
+      pushToast('下载目录已更新。', 'success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存下载目录失败');
+      reportError(err instanceof Error ? err.message : '保存下载目录失败');
     } finally {
       setIsSavingDownloadDirectory(false);
     }
@@ -406,8 +473,9 @@ export default function App() {
         defaultDir: current?.defaultDir ?? nextDir,
         isCustom: false,
       }));
+      pushToast('已恢复默认下载目录。', 'success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '恢复默认下载目录失败');
+      reportError(err instanceof Error ? err.message : '恢复默认下载目录失败');
     } finally {
       setIsSavingDownloadDirectory(false);
     }
@@ -415,6 +483,7 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <section className="hero-block">
         <Text UNSAFE_className="eyebrow">桌面主线项目</Text>
         <Heading level={1} UNSAFE_className="hero-title">

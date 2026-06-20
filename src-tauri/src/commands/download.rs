@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -23,6 +23,7 @@ use crate::{
 };
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
+static SSSTWITTER_DOWNLOAD_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Serialize)]
 struct DownloadStatusPayload {
@@ -442,6 +443,33 @@ fn run_ssstwitter_download_task(
             output_path: None,
         },
     );
+    let slot = ssstwitter_download_slot();
+    let wait_notice_needed = slot.try_lock().is_err();
+    if wait_notice_needed {
+        emit_status(
+            &app,
+            DownloadStatusPayload {
+                task_id: task_id.clone(),
+                title: title.clone(),
+                status: "queued".into(),
+                message: Some("ssstwitter 下载通道繁忙，正在排队等待。".into()),
+                output_path: None,
+            },
+        );
+    }
+    let _slot_guard = slot
+        .lock()
+        .map_err(|_| "ssstwitter 下载通道状态异常。".to_string())?;
+    emit_status(
+        &app,
+        DownloadStatusPayload {
+            task_id: task_id.clone(),
+            title: title.clone(),
+            status: "downloading".into(),
+            message: Some(format!("开始通过 ssstwitter 下载：{selection_label}")),
+            output_path: None,
+        },
+    );
 
     let output_path = download_dir.join(format!(
         "{}.{}",
@@ -519,6 +547,21 @@ fn run_ssstwitter_download_task(
         },
     );
     Ok(())
+}
+
+fn ssstwitter_download_slot() -> &'static Mutex<()> {
+    SSSTWITTER_DOWNLOAD_SLOT.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn with_ssstwitter_download_slot<F, T>(task: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let _guard = ssstwitter_download_slot()
+        .lock()
+        .expect("ssstwitter download slot should not be poisoned");
+    task()
 }
 
 /// A staging file in the system temp dir for an in-progress download.
@@ -702,9 +745,14 @@ mod tests {
     use super::{
         clean_format_descriptor, compose_download_title, direct_download_url,
         effective_download_dir, extract_ssstwitter_selection, format_eta, sanitize_filename,
-        staging_path_for,
+        staging_path_for, with_ssstwitter_download_slot,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn detects_http_download_url_from_format_id() {
@@ -799,6 +847,37 @@ mod tests {
         assert_eq!(
             compose_download_title("@4Brazzerlive 的 X 视频", Some("下载 HD 1080x1080")),
             "@4Brazzerlive 的 X 视频 - HD 1080x1080"
+        );
+    }
+
+    #[test]
+    fn serializes_ssstwitter_downloads_through_single_slot() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let holder = thread::spawn(move || {
+            with_ssstwitter_download_slot(|| {
+                entered_tx.send(()).expect("holder should report entry");
+                release_rx.recv().expect("holder should wait for release");
+            });
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("holder should enter slot first");
+
+        let started_at = Instant::now();
+        let waiter = thread::spawn(move || with_ssstwitter_download_slot(|| Instant::now()));
+
+        thread::sleep(Duration::from_millis(150));
+        release_tx.send(()).expect("release signal should be sent");
+
+        let entered_at = waiter.join().expect("waiter should complete");
+        holder.join().expect("holder should complete");
+
+        assert!(
+            entered_at.duration_since(started_at) >= Duration::from_millis(140),
+            "second download should wait for the first ssstwitter slot"
         );
     }
 }
