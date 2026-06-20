@@ -89,11 +89,17 @@ export function ResolveBoard({
     };
     window.addEventListener('keydown', onKey);
     // Freeze the page behind the drawer so scrolling stays on the drawer body.
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    // The scroll region is `.app-scroll` (below the titlebar), not the body.
+    const scroller = document.querySelector<HTMLElement>('.app-scroll');
+    const previousOverflow = scroller?.style.overflow ?? '';
+    if (scroller) {
+      scroller.style.overflow = 'hidden';
+    }
     return () => {
       window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = previousOverflow;
+      if (scroller) {
+        scroller.style.overflow = previousOverflow;
+      }
     };
   }, [openItem, onOpenChange]);
 

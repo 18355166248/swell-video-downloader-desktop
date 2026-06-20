@@ -708,11 +708,13 @@ export default function App() {
       : 1;
 
   return (
-    <main className="app-shell">
+    <>
       <TitleBar />
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
-      <div className="flow">
+      <div className="app-scroll">
+        <main className="app-shell">
+          <div className="flow">
         <section className="flow-step intro-step" data-step="01" aria-label="解析">
           <ResolvePanel
             urls={urls}
@@ -827,7 +829,9 @@ export default function App() {
             onResetDownloadDirectory={handleResetDownloadDirectory}
           />
         </section>
+          </div>
+        </main>
       </div>
-    </main>
+    </>
   );
 }

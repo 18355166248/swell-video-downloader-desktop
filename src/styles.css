@@ -37,12 +37,25 @@
 body {
   margin: 0;
   min-width: 960px;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   position: relative;
   background:
     radial-gradient(900px 520px at 12% -8%, rgba(210, 67, 32, 0.1), transparent 62%),
     radial-gradient(820px 600px at 108% 18%, rgba(53, 99, 233, 0.08), transparent 58%),
     var(--paper);
+}
+
+/* The page scroll region lives below the custom titlebar, so the scrollbar
+   never runs up alongside the title-bar / window controls. */
+.app-scroll {
+  position: fixed;
+  top: 44px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Fine grain overlay for paper texture — sits above the wash, below content. */
@@ -133,7 +146,7 @@ body::before {
 .app-shell {
   width: min(880px, calc(100vw - 80px));
   margin: 0 auto;
-  padding: 80px 0 96px;
+  padding: 32px 0 96px;
 }
 
 /* Custom window chrome — replaces the OS titlebar (decorations: false). */
