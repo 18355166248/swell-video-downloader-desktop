@@ -118,6 +118,10 @@ export async function startDownload(
   return invoke<string>('start_download', { url, formatId, title, cookieSource, cookieFilePath });
 }
 
+export async function cancelDownload(taskId: string) {
+  return invoke<void>('cancel_download', { taskId });
+}
+
 export async function listCookieSources(): Promise<CookieSource[]> {
   const response = await invoke<CookieSourceWire[]>('list_cookie_sources');
   return response.map((item) => ({

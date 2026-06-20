@@ -55,6 +55,7 @@ fn generate_preview_blocking(app: AppHandle, url: String, format_id: String) -> 
         Some(selection.label.as_str()),
         &clip_path,
         Some(PREVIEW_PREFIX_BYTES),
+        || false,
         |_downloaded, _total| {},
     )?;
 

@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread,
@@ -24,6 +25,13 @@ use crate::{
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SSSTWITTER_DOWNLOAD_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
+static DOWNLOAD_TASKS: OnceLock<Mutex<HashMap<String, DownloadTaskControl>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct DownloadTaskControl {
+    title: String,
+    cancel_requested: Arc<AtomicBool>,
+}
 
 #[derive(Clone, Serialize)]
 struct DownloadStatusPayload {
@@ -69,6 +77,7 @@ pub fn start_download(
 
     let task_id = format!("task-{}", DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed));
     let task_title = title.unwrap_or_else(|| "新下载任务".into());
+    let cancel_requested = Arc::new(AtomicBool::new(false));
 
     emit_status(
         &app,
@@ -93,8 +102,13 @@ pub fn start_download(
 
     let app_handle = app.clone();
     let return_task_id = task_id.clone();
+    register_download_task(
+        task_id.clone(),
+        task_title.clone(),
+        cancel_requested.clone(),
+    )?;
     thread::spawn(move || {
-        if let Err(message) = run_download_task(
+        let result = run_download_task(
             app_handle.clone(),
             task_id.clone(),
             task_title.clone(),
@@ -105,21 +119,89 @@ pub fn start_download(
             yt_dlp.path,
             ffmpeg.path,
             download_dir,
-        ) {
-            emit_error(
-                &app_handle,
-                DownloadStatusPayload {
-                    task_id,
-                    title: task_title,
-                    status: "failed".into(),
-                    message: Some(message),
-                    output_path: None,
-                },
-            );
+            cancel_requested,
+        );
+        unregister_download_task(&task_id);
+        if let Err(message) = result {
+            if message == "下载已取消" {
+                emit_status(
+                    &app_handle,
+                    DownloadStatusPayload {
+                        task_id,
+                        title: task_title,
+                        status: "canceled".into(),
+                        message: Some(message),
+                        output_path: None,
+                    },
+                );
+            } else {
+                emit_error(
+                    &app_handle,
+                    DownloadStatusPayload {
+                        task_id,
+                        title: task_title,
+                        status: "failed".into(),
+                        message: Some(message),
+                        output_path: None,
+                    },
+                );
+            }
         }
     });
 
     Ok(return_task_id)
+}
+
+#[tauri::command]
+pub fn cancel_download(app: AppHandle, task_id: String) -> Result<(), String> {
+    let control = {
+        let tasks = download_tasks()
+            .lock()
+            .map_err(|_| "下载任务状态异常。".to_string())?;
+        tasks.get(&task_id).cloned()
+    }
+    .ok_or_else(|| "下载任务不存在或已结束。".to_string())?;
+
+    control.cancel_requested.store(true, Ordering::SeqCst);
+    emit_status(
+        &app,
+        DownloadStatusPayload {
+            task_id,
+            title: control.title,
+            status: "canceling".into(),
+            message: Some("正在取消下载…".into()),
+            output_path: None,
+        },
+    );
+    Ok(())
+}
+
+fn register_download_task(
+    task_id: String,
+    title: String,
+    cancel_requested: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let mut tasks = download_tasks()
+        .lock()
+        .map_err(|_| "下载任务状态异常。".to_string())?;
+    tasks.insert(
+        task_id,
+        DownloadTaskControl {
+            title,
+            cancel_requested,
+        },
+    );
+    Ok(())
+}
+
+fn unregister_download_task(task_id: &str) {
+    if let Ok(mut tasks) = download_tasks().lock() {
+        tasks.remove(task_id);
+    }
+}
+
+fn download_tasks() -> &'static Mutex<HashMap<String, DownloadTaskControl>> {
+    DOWNLOAD_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn run_download_task(
@@ -133,6 +215,7 @@ fn run_download_task(
     yt_dlp_path: PathBuf,
     ffmpeg_path: PathBuf,
     download_dir: PathBuf,
+    cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     fs::create_dir_all(&download_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
@@ -145,6 +228,7 @@ fn run_download_task(
                 url,
                 selection,
                 download_dir,
+                cancel_requested,
             );
         }
     }
@@ -204,7 +288,7 @@ fn run_download_task(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let stdout_handle = stdout.map(|reader| {
+    let mut stdout_handle = stdout.map(|reader| {
         let app = app.clone();
         let task_id = task_id.clone();
         let title = title.clone();
@@ -215,7 +299,7 @@ fn run_download_task(
         })
     });
 
-    let stderr_handle = stderr.map(|reader| {
+    let mut stderr_handle = stderr.map(|reader| {
         let app = app.clone();
         let task_id = task_id.clone();
         let title = title.clone();
@@ -226,15 +310,31 @@ fn run_download_task(
         })
     });
 
-    let status = child
-        .wait()
-        .map_err(|err| format!("等待下载进程结束失败：{err}"))?;
+    let status = loop {
+        if cancel_requested.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(handle) = stdout_handle.take() {
+                let _ = handle.join();
+            }
+            if let Some(handle) = stderr_handle.take() {
+                let _ = handle.join();
+            }
+            return Err("下载已取消".into());
+        }
 
-    if let Some(handle) = stdout_handle {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(150)),
+            Err(err) => return Err(format!("等待下载进程结束失败：{err}")),
+        }
+    };
+
+    if let Some(handle) = stdout_handle.take() {
         let _ = handle.join();
     }
 
-    if let Some(handle) = stderr_handle {
+    if let Some(handle) = stderr_handle.take() {
         let _ = handle.join();
     }
 
@@ -430,6 +530,7 @@ fn run_ssstwitter_download_task(
     url: String,
     selection: SssTwitterSelection,
     download_dir: PathBuf,
+    cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let selection_label = selection.label.as_str();
     let file_title = compose_download_title(&title, Some(selection_label));
@@ -460,6 +561,9 @@ fn run_ssstwitter_download_task(
     let _slot_guard = slot
         .lock()
         .map_err(|_| "ssstwitter 下载通道状态异常。".to_string())?;
+    if cancel_requested.load(Ordering::SeqCst) {
+        return Err("下载已取消".into());
+    }
     emit_status(
         &app,
         DownloadStatusPayload {
@@ -497,6 +601,7 @@ fn run_ssstwitter_download_task(
         Some(selection_label),
         &staging_path,
         None,
+        || cancel_requested.load(Ordering::SeqCst),
         |downloaded_bytes, total_bytes| {
             let now = Instant::now();
             let started_at = *transfer_started_at.get_or_insert(now);

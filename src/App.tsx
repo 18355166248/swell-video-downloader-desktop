@@ -11,6 +11,7 @@ import {
   listenDownloadStatus,
 } from './lib/download-events';
 import {
+  cancelDownload,
   checkDependencies,
   generatePreview,
   getDownloadDirectorySettings,
@@ -144,6 +145,13 @@ function buildDownloadTitle(baseTitle: string, format: MediaFormat): string {
   return baseTitle.includes(descriptor) ? baseTitle : `${baseTitle} - ${descriptor}`;
 }
 
+function parseBatchUrls(value: string): string[] {
+  return value
+    .split(/\r?\n/u)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 function summarizeTitle(title: string, maxLength = 36): string {
   if (title.length <= maxLength) {
     return title;
@@ -153,9 +161,11 @@ function summarizeTitle(title: string, maxLength = 36): string {
 
 export default function App() {
   const [url, setUrl] = useState('');
+  const [batchUrls, setBatchUrls] = useState('');
   const [resolved, setResolved] = useState<ResolveMediaResponse | null>(null);
   const [error, setError] = useState('');
   const [isResolving, setIsResolving] = useState(false);
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
   const [downloadState, setDownloadState] = useState<DownloadBucketState>({
     current: [],
     history: loadStoredHistory(),
@@ -386,12 +396,22 @@ export default function App() {
       return;
     }
 
+    await enqueueDownload(trimmedUrl, resolved, format, currentSessionLabel, true);
+  }
+
+  async function enqueueDownload(
+    targetUrl: string,
+    targetResolved: ResolveMediaResponse,
+    format: MediaFormat,
+    sessionLabel: string,
+    notifyStart: boolean,
+  ): Promise<boolean> {
     setError('');
     setDownloadingIds((current) => new Set(current).add(format.id));
     try {
-      const taskTitle = buildDownloadTitle(resolved.title, format);
+      const taskTitle = buildDownloadTitle(targetResolved.title, format);
       const taskId = await startDownload(
-        trimmedUrl,
+        targetUrl,
         format.id ?? null,
         taskTitle,
         selectedCookieSource,
@@ -403,16 +423,20 @@ export default function App() {
           {
             id: taskId,
             title: taskTitle,
-            sessionLabel: currentSessionLabel,
+            sessionLabel,
             status: 'queued',
             progress: '0%',
           },
           ...current.current,
         ],
       }));
-      pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
+      if (notifyStart) {
+        pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
+      }
+      return true;
     } catch (err) {
       reportError(err instanceof Error ? err.message : '创建下载任务失败');
+      return false;
     } finally {
       setDownloadingIds((current) => {
         const next = new Set(current);
@@ -420,6 +444,73 @@ export default function App() {
         return next;
       });
     }
+  }
+
+  async function handleBatchDownload() {
+    const urls = parseBatchUrls(batchUrls);
+    if (urls.length === 0) {
+      reportError('请先粘贴要批量下载的链接，每行一个。');
+      return;
+    }
+
+    setIsBatchDownloading(true);
+    setError('');
+    setDownloadTab('current');
+    if (downloadState.current.length > 0) {
+      pushToast('已开始新的批量下载会话，当前队列已清空。', 'info');
+    }
+    setDownloadState((current) => archiveCurrentRows(current));
+
+    let successCount = 0;
+    const failures: string[] = [];
+
+    for (const targetUrl of urls) {
+      try {
+        const result = await resolveMedia(targetUrl, selectedCookieSource, cookieFilePath);
+        const started = await enqueueDownload(
+          targetUrl,
+          result,
+          result.recommendation,
+          deriveSessionLabel(targetUrl, result),
+          false,
+        );
+        if (started) {
+          successCount += 1;
+        } else {
+          failures.push(`${targetUrl}：创建下载任务失败`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '批量下载任务解析失败';
+        failures.push(`${targetUrl}：${message}`);
+      }
+    }
+
+    if (successCount > 0) {
+      pushToast(`批量任务已加入队列：${successCount} 个链接。`, 'success', 4200);
+    }
+    if (failures.length > 0) {
+      reportError(`以下链接处理失败：${failures.join('；')}`);
+    } else {
+      setBatchUrls('');
+    }
+    setIsBatchDownloading(false);
+  }
+
+  async function handleCancelDownload(row: DownloadRow) {
+    try {
+      await cancelDownload(row.id);
+      pushToast(`正在取消：${summarizeTitle(row.title)}`, 'info');
+    } catch (err) {
+      reportError(err instanceof Error ? err.message : '取消下载失败');
+    }
+  }
+
+  function handleDeleteHistoryRow(row: DownloadRow) {
+    setDownloadState((current) => ({
+      ...current,
+      history: current.history.filter((item) => item.id !== row.id),
+    }));
+    pushToast(`已删除历史记录：${summarizeTitle(row.title)}`, 'info');
   }
 
   async function handleOpenLocation(row: DownloadRow) {
@@ -498,9 +589,13 @@ export default function App() {
         <section className="flow-step" data-step="01" aria-label="解析">
           <ResolvePanel
             url={url}
+            batchUrls={batchUrls}
             isResolving={isResolving}
+            isBatchDownloading={isBatchDownloading}
             onUrlChange={setUrl}
+            onBatchUrlsChange={setBatchUrls}
             onResolve={handleResolve}
+            onBatchDownload={handleBatchDownload}
           />
           {error ? <InlineAlert variant="negative">{error}</InlineAlert> : null}
         </section>
@@ -555,17 +650,21 @@ export default function App() {
 
           {downloadTab === 'current' ? (
             <DownloadsTable
+              mode="current"
               ariaLabel="当前下载队列"
               emptyText="解析新视频后，这里只展示当前流程的下载任务。"
               rows={downloadState.current}
               onOpenLocation={handleOpenLocation}
+              onCancel={handleCancelDownload}
             />
           ) : (
             <DownloadsTable
+              mode="history"
               ariaLabel="下载历史"
               emptyText="还没有历史记录。完成或失败过的任务会出现在这里。"
               rows={downloadState.history}
               onOpenLocation={handleOpenLocation}
+              onDelete={handleDeleteHistoryRow}
             />
           )}
         </section>

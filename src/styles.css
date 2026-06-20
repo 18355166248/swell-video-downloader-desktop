@@ -311,8 +311,65 @@ body::before {
   gap: 18px;
 }
 
+.batch-panel {
+  display: grid;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.batch-panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+
+.batch-panel-sub {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.batch-textarea-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.batch-textarea-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.batch-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.55;
+}
+
+.batch-textarea:focus {
+  outline: 2px solid rgba(210, 67, 32, 0.22);
+  border-color: var(--accent);
+}
+
 .downloads-table {
   width: 100%;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .download-tabs {

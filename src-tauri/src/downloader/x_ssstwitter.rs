@@ -186,14 +186,16 @@ fn format_from_direct_url(download_url: &str, label: Option<&str>) -> SssTwitter
     }
 }
 
-fn stream_response_to_file<F>(
+fn stream_response_to_file<F, C>(
     mut response: Response,
     output_path: &Path,
     max_bytes: Option<u64>,
+    should_cancel: C,
     mut on_progress: F,
 ) -> Result<(u64, Option<u64>), String>
 where
     F: FnMut(u64, Option<u64>),
+    C: Fn() -> bool,
 {
     let total_bytes = response.content_length();
     let mut downloaded_bytes = 0u64;
@@ -206,6 +208,9 @@ where
     let mut buffer = vec![0u8; 256 * 1024];
 
     loop {
+        if should_cancel() {
+            return Err("下载已取消".into());
+        }
         let read = response
             .read(&mut buffer)
             .map_err(|error| format!("读取 ssstwitter 下载流失败：{error}"))?;
@@ -227,6 +232,9 @@ where
             .map_err(|error| format!("写入输出文件失败：{error}"))?;
         downloaded_bytes += bytes_to_write as u64;
         on_progress(downloaded_bytes, total_bytes);
+        if should_cancel() {
+            return Err("下载已取消".into());
+        }
 
         if let Some(limit) = max_bytes {
             if downloaded_bytes >= limit {
@@ -243,16 +251,18 @@ where
 /// Download a previously-resolved ssstwitter selection. When `direct_url` is
 /// present we stream it straight away (no re-query, no ~6s stall); if that link
 /// has expired we transparently re-resolve via `page_url` + label.
-pub fn download_selection_to_path<F>(
+pub fn download_selection_to_path<F, C>(
     page_url: &str,
     direct_url: Option<&str>,
     preferred_label: Option<&str>,
     output_path: &Path,
     max_bytes: Option<u64>,
+    should_cancel: C,
     mut on_progress: F,
 ) -> Result<SssTwitterDownloadResult, String>
 where
     F: FnMut(u64, Option<u64>),
+    C: Fn() -> bool,
 {
     let client = create_client()?;
 
@@ -260,7 +270,7 @@ where
         if let Ok(response) = open_direct_download(&client, direct) {
             let selected_format = format_from_direct_url(direct, preferred_label);
             let (downloaded_bytes, total_bytes) =
-                stream_response_to_file(response, output_path, max_bytes, &mut on_progress)?;
+                stream_response_to_file(response, output_path, max_bytes, &should_cancel, &mut on_progress)?;
             return Ok(SssTwitterDownloadResult {
                 selected_format,
                 downloaded_bytes,
@@ -272,7 +282,7 @@ where
     // The stored link expired (or was absent) — re-resolve and try again.
     let (response, selected_format) = open_x_via_ssstwitter_download(page_url, preferred_label)?;
     let (downloaded_bytes, total_bytes) =
-        stream_response_to_file(response, output_path, max_bytes, &mut on_progress)?;
+        stream_response_to_file(response, output_path, max_bytes, should_cancel, &mut on_progress)?;
     Ok(SssTwitterDownloadResult {
         selected_format,
         downloaded_bytes,
@@ -291,7 +301,15 @@ pub fn download_x_via_ssstwitter_to_path<F>(
 where
     F: FnMut(u64, Option<u64>),
 {
-    download_selection_to_path(url, None, preferred_label, output_path, max_bytes, on_progress)
+    download_selection_to_path(
+        url,
+        None,
+        preferred_label,
+        output_path,
+        max_bytes,
+        || false,
+        on_progress,
+    )
 }
 
 fn create_client() -> Result<Client, String> {
