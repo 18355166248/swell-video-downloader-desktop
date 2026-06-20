@@ -256,7 +256,7 @@ export default function App() {
 
   function reportError(message: string) {
     setError(message);
-    pushToast(message, 'error', 4200);
+    pushToast(message, 'error');
   }
 
   useEffect(() => {
@@ -327,14 +327,13 @@ export default function App() {
           notifiedDownloadIds.current.add(payload.task_id);
 
           if (payload.status === 'completed') {
-            pushToast(`下载完成：${summarizeTitle(payload.title)}`, 'success', 4200);
+            pushToast(`下载完成：${summarizeTitle(payload.title)}`, 'success');
           } else {
             pushToast(
               payload.message
                 ? `下载失败：${payload.message}`
                 : `下载失败：${summarizeTitle(payload.title)}`,
               'error',
-              4800,
             );
           }
         }
@@ -531,7 +530,6 @@ export default function App() {
           ? `解析完成：${successCount} 个视频，逐个选择清晰度后下载。`
           : `解析成功：发现 ${lastFormatCount} 个版本，选择清晰度后下载。`,
         'success',
-        4200,
       );
     }
     if (failures.length > 0) {
