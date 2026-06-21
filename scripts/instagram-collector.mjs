@@ -36,6 +36,10 @@ function classifyContentUrl(href) {
   return 'unknown';
 }
 
+function isContentUrl(href) {
+  return /\/(p|reel|reels|tv)\//.test(href);
+}
+
 // ---------------------------------------------------------------------------
 // Cookie bridge helpers
 // ---------------------------------------------------------------------------
@@ -153,28 +157,80 @@ async function collectProfileRecent(page, url, count) {
     }));
 }
 
-async function collectDetailNext(page, url, count) {
+// aria-label substrings for the "next" control, covering both the Chinese and
+// English Instagram UIs (Reels player + feed/post modal). Matched case-sensitively
+// with CSS `*=`, so include the casings we expect.
+const NEXT_CONTROL_SELECTORS = [
+  '[aria-label*="前往下一条"]', // Reels 播放器：前往下一条 Reels
+  '[aria-label*="下一条"]',
+  '[aria-label*="下一个"]',
+  '[aria-label*="Go to next"]',
+  '[aria-label*="Next"]',
+  '[aria-label*="next"]',
+];
+
+async function findNextControl(page) {
+  for (const selector of NEXT_CONTROL_SELECTORS) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count()) > 0) {
+      return locator;
+    }
+  }
+  return null;
+}
+
+// Advance to the next item using whichever control the current Instagram surface
+// exposes: the explicit "next" button (Reels player chevron / feed-modal arrow),
+// falling back to keyboard navigation (ArrowDown for Reels, ArrowRight for posts).
+// Returns true if an explicit next control was found and clicked.
+async function advanceToNext(page) {
+  const next = await findNextControl(page);
+  if (next) {
+    await next.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+    await next.click({ timeout: 2000 }).catch(() => {});
+    return true;
+  }
+  await page.keyboard.press('ArrowDown').catch(() => {});
+  await page.keyboard.press('ArrowRight').catch(() => {});
+  return false;
+}
+
+async function collectDetailNext(page, url, count, warnings) {
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   const ordered = [];
   const seen = new Set();
-  for (let i = 0; i < count; i += 1) {
-    const current = normalizeInstagramUrl(page.url());
-    if (seen.has(current)) break;
-    seen.add(current);
-    ordered.push(current);
-    if (ordered.length >= count) break;
+  let foundNextControl = false;
+  // Budget extra iterations: some advances land on a non-content URL or repeat,
+  // which we skip rather than count.
+  const maxAttempts = count * 4 + 4;
 
-    const nextButton = page
-      .locator('a[aria-label="Next"], button[aria-label="Next"], svg[aria-label="Next"]')
-      .first();
-    if ((await nextButton.count()) === 0) break;
-    await nextButton.click({ timeout: 5000 }).catch(() => {});
-    // Wait for the canonical URL or main content node to change.
+  for (let attempt = 0; attempt < maxAttempts && ordered.length < count; attempt += 1) {
+    await page.waitForTimeout(500);
+    const current = normalizeInstagramUrl(page.url());
+    if (isContentUrl(current) && !seen.has(current)) {
+      seen.add(current);
+      ordered.push(current);
+      if (ordered.length >= count) break;
+    }
+
+    const before = page.url();
+    const clicked = await advanceToNext(page);
+    foundNextControl = foundNextControl || clicked;
+    // The canonical URL changing is our signal that we moved to the next item.
     await page
-      .waitForFunction((prev) => window.location.href !== prev, current, { timeout: 5000 })
+      .waitForFunction((prev) => window.location.href !== prev, before, { timeout: 4000 })
       .catch(() => {});
-    await page.waitForTimeout(400);
+    if (page.url() === before) {
+      break;
+    }
   }
+
+  if (count > 1 && !foundNextControl && warnings) {
+    warnings.push(
+      '未找到「下一条」控件（可能未登录或页面结构变化），已尽量用键盘翻页。',
+    );
+  }
+
   return ordered.map((href) => ({
     url: href,
     kind: classifyContentUrl(href),
@@ -259,7 +315,7 @@ async function main() {
           items = await collectProfileRecent(page, url, count);
           break;
         case 'detail_next':
-          items = await collectDetailNext(page, url, count);
+          items = await collectDetailNext(page, url, count, warnings);
           break;
         case 'story_experimental':
           items = await collectStory(page, url, count);

@@ -253,10 +253,10 @@ fn run_download_task(
         "[run_download_task] task_id={task_id} url={url} format_id={:?} title={title}",
         format_id
     );
-    // Land downloads under <base>/<site>/<resource>/ so different sites and
-    // different posts never share a flat folder.
-    let target_dir = resource_target_dir(&download_dir, &url);
-    fs::create_dir_all(&target_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    // Land downloads under <base>/<site>/, then sort each finished file into a
+    // resource-type subfolder (视频 / 图片 / 音频 / 其他) by its extension.
+    let site_dir = site_target_dir(&download_dir, &url);
+    fs::create_dir_all(&site_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
     if url.contains("x.com") {
         if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
@@ -271,7 +271,7 @@ fn run_download_task(
                 title,
                 url,
                 selection,
-                target_dir,
+                site_dir,
                 cancel_requested,
             );
         }
@@ -296,7 +296,7 @@ fn run_download_task(
     command.arg("--print");
     command.arg("after_move:__FINAL_PATH__:%(filepath)s");
     command.arg("-o");
-    command.arg(target_dir.join(format!("{}.%(ext)s", sanitize_filename(&title))));
+    command.arg(site_dir.join(format!("{}.%(ext)s", sanitize_filename(&title))));
 
     let direct_download_url = direct_download_url(format_id.as_deref());
 
@@ -403,6 +403,8 @@ fn run_download_task(
         .and_then(|value| value.clone());
 
     if status.success() {
+        // Sort the finished file into its resource-type subfolder by extension.
+        let output_path = output_path.map(|path| relocate_into_category(&path, &site_dir));
         emit_status(
             &app,
             DownloadStatusPayload {
@@ -638,11 +640,9 @@ fn run_ssstwitter_download_task(
         },
     );
 
-    let output_path = download_dir.join(format!(
-        "{}.{}",
-        sanitize_filename(&file_title),
-        "mp4"
-    ));
+    // ssstwitter only serves x.com videos, so this always lands in 视频.
+    let output_path =
+        category_dir(&download_dir, "mp4").join(format!("{}.{}", sanitize_filename(&file_title), "mp4"));
     // Stream into the system temp dir, then move into Downloads on completion.
     // Windows Defender scans the Downloads folder far more aggressively (downloaded-
     // file / mark-of-the-web handling), throttling the active write; temp is lighter,
@@ -778,11 +778,9 @@ fn effective_download_dir(default_dir: PathBuf, configured_dir: Option<&str>) ->
         .unwrap_or(default_dir)
 }
 
-/// Group finished downloads as `<base>/<site>/<resource>/<file>` so videos from
-/// different sites — and different posts/videos within one site — never mix in a
-/// single flat folder. Different qualities of the same resource share its folder.
-fn resource_target_dir(base: &Path, url: &str) -> PathBuf {
-    base.join(site_folder(url)).join(resource_folder(url))
+/// Per-website folder under the download base, e.g. `<base>/instagram.com`.
+fn site_target_dir(base: &Path, url: &str) -> PathBuf {
+    base.join(site_folder(url))
 }
 
 /// Top-level folder per website, derived from the host (without a `www.` prefix).
@@ -800,61 +798,40 @@ fn site_folder(url: &str) -> String {
     }
 }
 
-/// A stable per-resource folder name. Prefers the site-specific content id
-/// (Instagram shortcode, X status id, Pornhub viewkey); otherwise falls back to
-/// the last path segment, then to a constant so a folder always exists.
-fn resource_folder(url: &str) -> String {
-    if let Ok(parsed) = reqwest::Url::parse(url) {
-        let segments: Vec<String> = parsed
-            .path_segments()
-            .map(|items| {
-                items
-                    .filter(|item| !item.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let host = parsed.host_str().unwrap_or("");
-
-        if host.contains("instagram.com") {
-            if let Some(pos) = segments.iter().position(|segment| {
-                segment == "p" || segment == "reel" || segment == "reels" || segment == "tv"
-            }) {
-                if let Some(code) = segments.get(pos + 1) {
-                    return sanitize_filename(code);
-                }
-            }
-            if let Some(user) = segments.first() {
-                return sanitize_filename(user);
-            }
-        }
-
-        if host.contains("x.com") {
-            if let Some(pos) = segments.iter().position(|segment| segment == "status") {
-                if let Some(id) = segments.get(pos + 1) {
-                    return sanitize_filename(id);
-                }
-            }
-            if let Some(user) = segments.first() {
-                return sanitize_filename(user);
-            }
-        }
-
-        if host.contains("pornhub.com") {
-            if let Some((_, value)) = parsed.query_pairs().find(|(key, _)| key == "viewkey") {
-                return sanitize_filename(&value);
-            }
-        }
-
-        if let Some(last) = segments.last() {
-            let cleaned = sanitize_filename(last);
-            if cleaned != "download" {
-                return cleaned;
-            }
-        }
+/// Coarse resource-type folder inside a site folder, by file extension. All
+/// videos land together, all images together, etc. — no per-post/author folders.
+fn category_folder(ext: &str) -> &'static str {
+    match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "mp4" | "webm" | "mkv" | "mov" | "m4v" | "flv" | "avi" | "ts" | "3gp" => "视频",
+        "jpg" | "jpeg" | "png" | "webp" | "gif" | "heic" | "heif" | "bmp" | "avif" => "图片",
+        "m4a" | "mp3" | "aac" | "opus" | "ogg" | "oga" | "wav" | "flac" => "音频",
+        _ => "其他",
     }
+}
 
-    "resource".into()
+fn category_dir(site_dir: &Path, ext: &str) -> PathBuf {
+    site_dir.join(category_folder(ext))
+}
+
+/// Move a finished file into its resource-type folder under `site_dir`, returning
+/// the new path. Best-effort: on any failure the original path is returned.
+fn relocate_into_category(file_path: &str, site_dir: &Path) -> String {
+    let path = Path::new(file_path);
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let Some(file_name) = path.file_name() else {
+        return file_path.to_string();
+    };
+    let dest = category_dir(site_dir, ext).join(file_name);
+    if dest == path {
+        return file_path.to_string();
+    }
+    match move_into_place(path, &dest) {
+        Ok(()) => dest.display().to_string(),
+        Err(_) => file_path.to_string(),
+    }
 }
 
 /// Persistent config lives in a device-level folder under the user's home
@@ -1077,10 +1054,11 @@ fn sanitize_filename(value: &str) -> String {
 mod tests {
     use super::{
         apply_download_progress_args,
-        clean_format_descriptor, compose_download_title, decode_secret, direct_download_url,
-        effective_download_dir, encode_secret, extract_ssstwitter_selection, format_eta,
-        normalize_optional, requires_binary_toolchain, resource_folder, resource_target_dir,
-        sanitize_filename, site_folder, staging_path_for, with_ssstwitter_download_slot,
+        category_dir, category_folder, clean_format_descriptor, compose_download_title,
+        decode_secret, direct_download_url, effective_download_dir, encode_secret,
+        extract_ssstwitter_selection, format_eta, normalize_optional, requires_binary_toolchain,
+        sanitize_filename, site_folder, site_target_dir, staging_path_for,
+        with_ssstwitter_download_slot,
     };
     use std::{
         path::{Path, PathBuf},
@@ -1199,48 +1177,32 @@ mod tests {
     }
 
     #[test]
-    fn resource_folder_uses_site_specific_ids() {
-        assert_eq!(
-            resource_folder("https://www.instagram.com/p/C8w2abcDEF/"),
-            "C8w2abcDEF"
-        );
-        assert_eq!(
-            resource_folder("https://www.instagram.com/instagram/reel/DZu6dkVyImf/"),
-            "DZu6dkVyImf"
-        );
-        assert_eq!(
-            resource_folder("https://www.instagram.com/reels/DZxVqbsTzqZ/"),
-            "DZxVqbsTzqZ"
-        );
-        assert_eq!(
-            resource_folder("https://x.com/4Brazzerlive/status/2068239068916507115/video/1"),
-            "2068239068916507115"
-        );
-        assert_eq!(
-            resource_folder("https://www.pornhub.com/view_video.php?viewkey=ph5f00abc"),
-            "ph5f00abc"
-        );
+    fn category_folder_groups_by_resource_type() {
+        assert_eq!(category_folder("mp4"), "视频");
+        assert_eq!(category_folder("MOV"), "视频");
+        assert_eq!(category_folder(".webm"), "视频");
+        assert_eq!(category_folder("jpg"), "图片");
+        assert_eq!(category_folder("webp"), "图片");
+        assert_eq!(category_folder("m4a"), "音频");
+        assert_eq!(category_folder("mp3"), "音频");
+        assert_eq!(category_folder("srt"), "其他");
+        assert_eq!(category_folder(""), "其他");
     }
 
     #[test]
-    fn resource_folder_falls_back_to_profile_or_constant() {
-        assert_eq!(
-            resource_folder("https://www.instagram.com/instagram/"),
-            "instagram"
-        );
-        assert_eq!(resource_folder("https://example.com/"), "resource");
-    }
-
-    #[test]
-    fn resource_target_dir_nests_site_and_resource() {
-        let dir = resource_target_dir(
+    fn site_and_category_dirs_nest_under_base() {
+        let site = site_target_dir(
             Path::new(r"C:\Downloads\video-downloader"),
-            "https://www.instagram.com/p/C8w2abcDEF/",
+            "https://www.instagram.com/reels/DZxVqbsTzqZ/",
+        );
+        assert_eq!(
+            site,
+            PathBuf::from(r"C:\Downloads\video-downloader\instagram.com")
         );
 
         assert_eq!(
-            dir,
-            PathBuf::from(r"C:\Downloads\video-downloader\instagram.com\C8w2abcDEF")
+            category_dir(&site, "mp4"),
+            PathBuf::from(r"C:\Downloads\video-downloader\instagram.com\视频")
         );
     }
 

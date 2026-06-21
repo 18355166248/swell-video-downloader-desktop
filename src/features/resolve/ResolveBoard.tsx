@@ -1,6 +1,7 @@
 import { Button, ProgressCircle, Text } from '@react-spectrum/s2';
-import { useEffect } from 'react';
+import { useEffect, useRef, type UIEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { lockAppScroll } from '../../lib/scroll-lock';
 import type { MediaFormat, ResolveMediaResponse } from '../../lib/types';
 
 export type ResolveItemStatus = 'loading' | 'ready' | 'failed' | 'selected';
@@ -22,6 +23,9 @@ type ResolveBoardProps = {
   onOpenChange: (url: string | null) => void;
   onDownload: (item: ResolveItem, format: MediaFormat) => void;
 };
+
+// Scroll distance (px) over which the drawer preview shrinks to its minimum.
+const PREVIEW_SHRINK_DISTANCE = 200;
 
 const STATUS_TEXT: Record<ResolveItemStatus, string> = {
   loading: '解析中',
@@ -78,8 +82,28 @@ export function ResolveBoard({
   const nextItem =
     openIndex >= 0 && openIndex < openable.length - 1 ? openable[openIndex + 1] : null;
 
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // Drive the sticky preview's shrink amount from the drawer scroll position.
+  function handleDrawerScroll(event: UIEvent<HTMLDivElement>) {
+    const el = event.currentTarget;
+    const progress = Math.min(1, Math.max(0, el.scrollTop / PREVIEW_SHRINK_DISTANCE));
+    el.style.setProperty('--preview-shrink', String(progress));
+  }
+
+  // Reset scroll + preview size whenever a different video is opened.
   useEffect(() => {
-    if (!openItem) {
+    const el = bodyRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTop = 0;
+    el.style.setProperty('--preview-shrink', '0');
+  }, [openItem?.url]);
+
+  const isDrawerOpen = openItem !== null;
+  useEffect(() => {
+    if (!isDrawerOpen) {
       return;
     }
     const onKey = (event: KeyboardEvent) => {
@@ -88,20 +112,14 @@ export function ResolveBoard({
       }
     };
     window.addEventListener('keydown', onKey);
-    // Freeze the page behind the drawer so scrolling stays on the drawer body.
-    // The scroll region is `.app-scroll` (below the titlebar), not the body.
-    const scroller = document.querySelector<HTMLElement>('.app-scroll');
-    const previousOverflow = scroller?.style.overflow ?? '';
-    if (scroller) {
-      scroller.style.overflow = 'hidden';
-    }
+    // Freeze the page behind the drawer (shared lock so nested overlays and
+    // re-renders can't leave the page stuck with overflow: hidden).
+    const releaseScroll = lockAppScroll();
     return () => {
       window.removeEventListener('keydown', onKey);
-      if (scroller) {
-        scroller.style.overflow = previousOverflow;
-      }
+      releaseScroll();
     };
-  }, [openItem, onOpenChange]);
+  }, [isDrawerOpen, onOpenChange]);
 
   return (
     <>
@@ -182,19 +200,21 @@ export function ResolveBoard({
               </div>
             </header>
 
-            <div className="drawer-body">
+            <div className="drawer-body" ref={bodyRef} onScroll={handleDrawerScroll}>
               {openItem.status === 'failed' ? (
                 <Text UNSAFE_className="resolve-error">{openItem.error ?? '解析失败'}</Text>
               ) : openItem.resolved ? (
                 <>
-                  <div className="preview-frame">
-                    {openItem.thumbnail ? (
-                      <img className="preview-image" src={openItem.thumbnail} alt="视频预览" />
-                    ) : (
-                      <div className="preview-placeholder">
-                        <Text>{openItem.isPreviewLoading ? '正在生成预览…' : '无预览'}</Text>
-                      </div>
-                    )}
+                  <div className="preview-sticky">
+                    <div className="preview-frame">
+                      {openItem.thumbnail ? (
+                        <img className="preview-image" src={openItem.thumbnail} alt="视频预览" />
+                      ) : (
+                        <div className="preview-placeholder">
+                          <Text>{openItem.isPreviewLoading ? '正在生成预览…' : '无预览'}</Text>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   <div className="result-meta">

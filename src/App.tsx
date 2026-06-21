@@ -29,6 +29,7 @@ import {
   setDownloadDir,
   startDownload,
 } from './lib/tauri';
+import { isSupportedVideoUrl, supportedSitesLabel } from './lib/supported-sites';
 import type {
   AppSettings,
   CookieSource,
@@ -676,6 +677,16 @@ export default function App() {
     // Any bad line blocks the whole run so the user fixes it before resolving.
     if (invalid.length > 0) {
       reportError(`以下不是有效的视频地址，请检查后重试：${invalid.join('；')}`);
+      return;
+    }
+
+    // Valid URLs that point at sites we don't support yet get a friendly hint
+    // listing what is currently supported, instead of a backend error later.
+    const unsupported = valid.filter((value) => !isSupportedVideoUrl(value));
+    if (unsupported.length > 0) {
+      reportError(
+        `暂不支持以下网站的视频：${unsupported.join('；')}。目前支持：${supportedSitesLabel()}。`,
+      );
       return;
     }
 

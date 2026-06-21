@@ -1,4 +1,5 @@
 import { Button, ProgressCircle, Text } from '@react-spectrum/s2';
+import { SUPPORTED_VIDEO_SITES } from '../../lib/supported-sites';
 
 type ResolvePanelProps = {
   urls: string;
@@ -21,6 +22,14 @@ export function ResolvePanel(props: ResolvePanelProps) {
         <Text UNSAFE_className="intro-tagline">
           粘贴视频页地址即可。一行一个链接，解析后会列出每个视频，逐个选择清晰度再下载。
         </Text>
+        <div className="supported-sites" aria-label="目前支持的视频网站">
+          <span className="supported-sites-label">目前支持</span>
+          {SUPPORTED_VIDEO_SITES.map((site) => (
+            <span key={site.host} className="supported-site-chip">
+              {site.label}
+            </span>
+          ))}
+        </div>
       </div>
 
       <label className="intro-input-wrap">
@@ -28,7 +37,7 @@ export function ResolvePanel(props: ResolvePanelProps) {
           className="batch-textarea intro-textarea"
           value={props.urls}
           onChange={(event) => props.onUrlsChange(event.target.value)}
-          placeholder={'粘贴 x.com / pornhub.com 视频页地址\n多条则每行一个'}
+          placeholder={'粘贴视频页地址，一行一个链接'}
           rows={4}
         />
         {props.urlCount > 0 ? (

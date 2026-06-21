@@ -97,8 +97,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 placeholder={props.downloadDirectory?.defaultDir ?? '输入下载目录'}
                 description={
                   props.downloadDirectory?.isCustom
-                    ? `当前使用自定义目录，默认目录是 ${props.downloadDirectory.defaultDir}。下载会按「网站/资源」分文件夹存放。`
-                    : '当前使用默认目录；下载会按「网站/资源」分文件夹存放，失败下载保留在 incomplete 文件夹里。'
+                    ? `当前使用自定义目录，默认目录是 ${props.downloadDirectory.defaultDir}。下载会按「网站/类型(视频·图片·音频)」分文件夹存放。`
+                    : '当前使用默认目录；下载会按「网站/类型(视频·图片·音频)」分文件夹存放，失败下载保留在 incomplete 文件夹里。'
                 }
                 UNSAFE_style={{ width: '100%' }}
               />

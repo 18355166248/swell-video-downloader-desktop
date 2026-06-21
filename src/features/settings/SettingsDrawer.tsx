@@ -1,6 +1,7 @@
 import { Text } from '@react-spectrum/s2';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { lockAppScroll } from '../../lib/scroll-lock';
 import { SettingsPanel, type SettingsPanelProps } from './SettingsPanel';
 
 type SettingsDrawerProps = SettingsPanelProps & {
@@ -19,17 +20,10 @@ export function SettingsDrawer({ open, onClose, ...panelProps }: SettingsDrawerP
       }
     };
     window.addEventListener('keydown', onKey);
-    // Freeze the page behind the drawer so scrolling stays on the drawer body.
-    const scroller = document.querySelector<HTMLElement>('.app-scroll');
-    const previousOverflow = scroller?.style.overflow ?? '';
-    if (scroller) {
-      scroller.style.overflow = 'hidden';
-    }
+    const releaseScroll = lockAppScroll();
     return () => {
       window.removeEventListener('keydown', onKey);
-      if (scroller) {
-        scroller.style.overflow = previousOverflow;
-      }
+      releaseScroll();
     };
   }, [open, onClose]);
 

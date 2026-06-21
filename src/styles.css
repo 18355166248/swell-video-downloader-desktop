@@ -747,7 +747,34 @@ body::before {
 }
 
 .drawer-body .preview-frame {
-  margin-top: 0;
+  margin: 0;
+}
+
+/* Sticky, shrink-on-scroll preview header inside the resolve drawer. The wrapper
+   pulls up over the drawer-body's top padding so list rows scroll out of sight
+   behind it instead of peeking above. `--preview-shrink` (0→1) is set on scroll. */
+.drawer-body .preview-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: -18px -20px 18px;
+  padding: 18px 20px 12px;
+  background: var(--paper-raised);
+  border-bottom: 1px solid transparent;
+}
+
+.drawer-body .preview-sticky::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background: var(--line);
+  opacity: var(--preview-shrink, 0);
+}
+
+.drawer-body .preview-image {
+  max-height: calc(380px - 190px * var(--preview-shrink, 0));
+  transition: max-height 0.06s linear;
 }
 
 .resolve-error {
@@ -1384,6 +1411,32 @@ body::before {
 
 .settings-drawer .settings-panel-stack {
   margin: 0;
+}
+
+.supported-sites {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.supported-sites-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+.supported-site-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
 }
 
 .settings-fab {
