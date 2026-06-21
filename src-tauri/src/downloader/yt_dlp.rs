@@ -321,6 +321,19 @@ pub fn classify_yt_dlp_error(raw: &str) -> YtDlpErrorInfo {
         };
     }
 
+    // Content the logged-in account simply isn't allowed to see (audience /
+    // visibility limited). Distinct from "not logged in" — adding a sessionid
+    // won't help unless it's an account with access.
+    if lower.contains("isn't available to everyone")
+        || lower.contains("can't be seen by certain audiences")
+        || lower.contains("certain audiences")
+    {
+        return YtDlpErrorInfo {
+            error_category: "audience_restricted".into(),
+            normalized_message: "该 Instagram 内容设置了受众/可见性限制，当前登录账号无权查看，无法下载。可换一个有访问权限的账号 sessionid 再试。".into(),
+        };
+    }
+
     if lower.contains("login")
         || lower.contains("sign in")
         || lower.contains("members only")
@@ -612,6 +625,16 @@ mod tests {
 
         assert_eq!(info.error_category, "login_or_access_required");
         assert!(info.normalized_message.contains("sessionid"));
+    }
+
+    #[test]
+    fn classify_audience_restricted_distinct_from_login() {
+        let info = classify_yt_dlp_error(
+            "ERROR: [Instagram] DZfkprzBCdN: This content isn't available to everyone: It can't be seen by certain audiences.",
+        );
+
+        assert_eq!(info.error_category, "audience_restricted");
+        assert!(info.normalized_message.contains("受众"));
     }
 
     #[test]

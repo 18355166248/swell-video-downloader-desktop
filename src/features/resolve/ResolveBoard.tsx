@@ -1,5 +1,5 @@
-import { Button, ProgressCircle, Text } from '@react-spectrum/s2';
-import { useEffect, useRef, type UIEvent } from 'react';
+import { ActionButton, Button, ProgressCircle, Text } from '@react-spectrum/s2';
+import { useEffect, useRef, useState, type UIEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { lockAppScroll } from '../../lib/scroll-lock';
 import type { MediaFormat, ResolveMediaResponse } from '../../lib/types';
@@ -26,6 +26,9 @@ type ResolveBoardProps = {
 
 // Scroll distance (px) over which the drawer preview shrinks to its minimum.
 const PREVIEW_SHRINK_DISTANCE = 200;
+
+// Max cards shown per page in the resolve grid; beyond this, pagination kicks in.
+const GRID_PAGE_SIZE = 12;
 
 const STATUS_TEXT: Record<ResolveItemStatus, string> = {
   loading: '解析中',
@@ -82,6 +85,35 @@ export function ResolveBoard({
   const nextItem =
     openIndex >= 0 && openIndex < openable.length - 1 ? openable[openIndex + 1] : null;
 
+  // Pagination for the grid: show GRID_PAGE_SIZE cards per page.
+  const gridPageCount = Math.max(1, Math.ceil(items.length / GRID_PAGE_SIZE));
+  const [gridPage, setGridPage] = useState(0);
+
+  // Clamp page when items shrink (e.g. resolve cancelled mid-flight).
+  useEffect(() => {
+    setGridPage((current) => Math.min(current, gridPageCount - 1));
+  }, [gridPageCount]);
+
+  // Auto-navigate to the page containing the opened item so the highlight is
+  // always visible when a drawer opens.
+  useEffect(() => {
+    if (!openUrl) {
+      return;
+    }
+    const idx = items.findIndex((item) => item.url === openUrl);
+    if (idx >= 0) {
+      setGridPage(Math.floor(idx / GRID_PAGE_SIZE));
+    }
+  }, [openUrl, items]);
+
+  const safeGridPage = Math.min(gridPage, gridPageCount - 1);
+  const needsPagination = items.length > GRID_PAGE_SIZE;
+  const pageItems = needsPagination
+    ? items.slice(safeGridPage * GRID_PAGE_SIZE, safeGridPage * GRID_PAGE_SIZE + GRID_PAGE_SIZE)
+    : items;
+  // Global index offset so card numbering stays sequential across pages.
+  const pageOffset = needsPagination ? safeGridPage * GRID_PAGE_SIZE : 0;
+
   const bodyRef = useRef<HTMLDivElement>(null);
 
   // Drive the sticky preview's shrink amount from the drawer scroll position.
@@ -124,7 +156,8 @@ export function ResolveBoard({
   return (
     <>
       <div className="resolve-grid">
-        {items.map((item, index) => {
+        {pageItems.map((item, pageIndex) => {
+          const globalIndex = pageOffset + pageIndex;
           const interactive = item.status !== 'loading';
           return (
             <button
@@ -137,7 +170,7 @@ export function ResolveBoard({
             >
               <span className="resolve-entry-top">
                 <span className={`resolve-dot dot-${item.status}`} aria-hidden="true" />
-                <span className="resolve-entry-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="resolve-entry-index">{String(globalIndex + 1).padStart(2, '0')}</span>
                 <span className={`resolve-entry-status badge-${item.status}`}>
                   {item.status === 'loading' ? (
                     <ProgressCircle aria-label="解析中" size="S" isIndeterminate />
@@ -150,6 +183,28 @@ export function ResolveBoard({
           );
         })}
       </div>
+
+      {needsPagination ? (
+        <div className="resolve-pager">
+          <ActionButton
+            aria-label="上一页"
+            isDisabled={safeGridPage === 0}
+            onPress={() => setGridPage((current) => Math.max(0, current - 1))}
+          >
+            上一页
+          </ActionButton>
+          <span className="resolve-pager-info">
+            第 {safeGridPage + 1} / {gridPageCount} 页 · 共 {items.length} 个
+          </span>
+          <ActionButton
+            aria-label="下一页"
+            isDisabled={safeGridPage >= gridPageCount - 1}
+            onPress={() => setGridPage((current) => Math.min(gridPageCount - 1, current + 1))}
+          >
+            下一页
+          </ActionButton>
+        </div>
+      ) : null}
 
       {openItem
         ? createPortal(

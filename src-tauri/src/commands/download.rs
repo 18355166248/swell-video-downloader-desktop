@@ -104,6 +104,7 @@ struct AppSettings {
     instagram_cookie_file_path: Option<String>,
     instagram_collect_mode: Option<String>,
     instagram_collect_count: Option<String>,
+    auto_download: Option<bool>,
 }
 
 /// Settings exposed to the UI (sessionid decoded back to plain text).
@@ -115,6 +116,7 @@ pub struct AppSettingsPayload {
     pub instagram_cookie_file_path: Option<String>,
     pub instagram_collect_mode: Option<String>,
     pub instagram_collect_count: Option<String>,
+    pub auto_download: Option<bool>,
 }
 
 /// Full snapshot of UI-editable settings sent on every save.
@@ -126,6 +128,7 @@ pub struct AppSettingsUpdate {
     pub instagram_cookie_file_path: Option<String>,
     pub instagram_collect_mode: Option<String>,
     pub instagram_collect_count: Option<String>,
+    pub auto_download: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -932,6 +935,7 @@ fn settings_to_payload(settings: &AppSettings) -> AppSettingsPayload {
         instagram_cookie_file_path: settings.instagram_cookie_file_path.clone(),
         instagram_collect_mode: settings.instagram_collect_mode.clone(),
         instagram_collect_count: settings.instagram_collect_count.clone(),
+        auto_download: settings.auto_download,
     }
 }
 
@@ -955,6 +959,7 @@ pub fn set_app_settings(
     stored.instagram_collect_count = normalize_optional(settings.instagram_collect_count);
     stored.instagram_sessionid_b64 =
         normalize_optional(settings.instagram_sessionid).map(|value| encode_secret(&value));
+    stored.auto_download = settings.auto_download;
 
     save_app_settings(&app, &stored)?;
     Ok(settings_to_payload(&stored))

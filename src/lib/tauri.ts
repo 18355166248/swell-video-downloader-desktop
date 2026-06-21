@@ -245,6 +245,7 @@ type AppSettingsWire = {
   instagram_cookie_file_path?: string | null;
   instagram_collect_mode?: string | null;
   instagram_collect_count?: string | null;
+  auto_download?: boolean | null;
 };
 
 function mapAppSettings(wire: AppSettingsWire): AppSettings {
@@ -255,6 +256,7 @@ function mapAppSettings(wire: AppSettingsWire): AppSettings {
     instagramCookieFilePath: wire.instagram_cookie_file_path ?? '',
     instagramCollectMode: (wire.instagram_collect_mode as InstagramCollectMode) || 'single',
     instagramCollectCount: wire.instagram_collect_count ?? '1',
+    autoDownload: wire.auto_download ?? false,
   };
 }
 
@@ -273,6 +275,7 @@ export async function saveAppSettings(settings: AppSettings): Promise<AppSetting
       instagram_cookie_file_path: settings.instagramCookieFilePath || null,
       instagram_collect_mode: settings.instagramCollectMode || null,
       instagram_collect_count: settings.instagramCollectCount || null,
+      auto_download: settings.autoDownload,
     },
   });
   return mapAppSettings(wire);

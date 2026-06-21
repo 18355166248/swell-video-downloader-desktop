@@ -1,4 +1,4 @@
-import { Button, InlineAlert, Picker, PickerItem, Text } from '@react-spectrum/s2';
+import { Button, InlineAlert, Text } from '@react-spectrum/s2';
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
@@ -6,6 +6,7 @@ import { DownloadsTable, type DownloadRow } from './features/downloads/Downloads
 import { DiagnosticPanel } from './features/resolve/DiagnosticPanel';
 import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
+import { SessionIdHelpDrawer } from './features/settings/SessionIdHelpDrawer';
 import { SettingsDrawer } from './features/settings/SettingsDrawer';
 import {
   listenDownloadError,
@@ -47,7 +48,7 @@ type DownloadBucketState = {
   history: DownloadRow[];
 };
 
-type DownloadTab = 'current' | 'history';
+type DownloadTab = 'current' | 'history' | 'retry';
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
@@ -121,17 +122,16 @@ function updateRowCollections(
   const updateList = (rows: DownloadRow[]) =>
     rows.map((row) => (row.id === taskId ? updater(row) : row));
 
-  if (state.current.some((row) => row.id === taskId)) {
-    return {
-      ...state,
-      current: updateList(state.current),
-    };
-  }
+  const inCurrent = state.current.some((row) => row.id === taskId);
+  const inHistory = state.history.some((row) => row.id === taskId);
 
-  if (state.history.some((row) => row.id === taskId)) {
+  // Update BOTH lists when the id appears in each — prevents stale history
+  // entries (e.g. a fallback "queued" row) from surviving after the same
+  // task has progressed to "completed" in current.
+  if (inCurrent || inHistory) {
     return {
-      ...state,
-      history: updateList(state.history),
+      current: inCurrent ? updateList(state.current) : state.current,
+      history: inHistory ? updateList(state.history) : state.history,
     };
   }
 
@@ -334,6 +334,7 @@ export default function App() {
     history: loadStoredHistory(),
   });
   const [downloadTab, setDownloadTab] = useState<DownloadTab>('current');
+  const [selectedRetryIds, setSelectedRetryIds] = useState<Set<string>>(new Set());
   const [downloadDir, setDownloadDirState] = useState('');
   const [downloadDirectorySettings, setDownloadDirectorySettings] =
     useState<DownloadDirectorySettings | null>(null);
@@ -359,7 +360,9 @@ export default function App() {
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSessionIdHelpOpen, setIsSessionIdHelpOpen] = useState(false);
   const [batchQuality, setBatchQuality] = useState<BatchQuality>('best');
+  const [autoDownload, setAutoDownload] = useState(false);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
   // Task ids the user removed from the list — late progress/status events for
   // these are ignored so a deleted row never re-appears.
@@ -405,6 +408,7 @@ export default function App() {
       instagramCookieFilePath,
       instagramCollectMode,
       instagramCollectCount,
+      autoDownload,
       ...partial,
     };
     void saveAppSettings(snapshot).catch((err) => {
@@ -442,6 +446,11 @@ export default function App() {
     persistSettings({ instagramCollectCount: value });
   }
 
+  function handleAutoDownloadChange(value: boolean) {
+    setAutoDownload(value);
+    persistSettings({ autoDownload: value });
+  }
+
   useEffect(() => {
     async function loadSettingsData() {
       const [sources, dependencies, dirSettings, appSettings] = await Promise.all([
@@ -466,6 +475,7 @@ export default function App() {
       setInstagramCookieFilePath(appSettings.instagramCookieFilePath);
       setInstagramCollectMode(appSettings.instagramCollectMode);
       setInstagramCollectCount(appSettings.instagramCollectCount);
+      setAutoDownload(appSettings.autoDownload);
       setDependencyStatus(dependencies);
       setDownloadDirectorySettings(dirSettings);
       setDownloadDirState(dirSettings.currentDir);
@@ -534,8 +544,8 @@ export default function App() {
           }
         }
 
-        setDownloadState((current) =>
-          updateRowCollections(
+        setDownloadState((current) => {
+          const updated = updateRowCollections(
             current,
             payload.task_id,
             (row) => ({
@@ -554,8 +564,18 @@ export default function App() {
               ...createFallbackRow(payload.task_id, payload.title, payload.status),
               outputPath: payload.output_path ?? null,
             },
-          ),
-        );
+          );
+          // Auto-archive: sweep finished downloads into history so the
+          // "current" tab only shows active/in-flight tasks.
+          if (
+            payload.status === 'completed' ||
+            payload.status === 'failed' ||
+            payload.status === 'canceled'
+          ) {
+            return archiveFinishedRows(updated);
+          }
+          return updated;
+        });
       }),
       listenDownloadError((payload) => {
         if (payload.task_id && dismissedDownloadIds.current.has(payload.task_id)) {
@@ -746,7 +766,29 @@ export default function App() {
     // Playwright collector first; the canonical URLs it returns then flow into
     // the existing resolve queue.
     if (unique.length === 1 && isInstagramUrl(unique[0])) {
+      // Pre-check: Instagram requires login credentials. If neither sessionid
+      // nor a cookies.txt file is configured, guide the user before failing.
+      if (!instagramSessionId && !instagramCookieFilePath) {
+        pushToast(
+          'Instagram 内容需要登录态才能访问。请先在设置中配置 sessionid 或 cookies.txt。',
+          'error',
+        );
+        setIsSessionIdHelpOpen(true);
+        return;
+      }
       void handleResolveInstagram(unique[0]);
+      return;
+    }
+
+    // Multi-URL batch: warn if any Instagram links are included without login
+    // credentials, so the user can fix it before wasting time on partial failures.
+    const hasInstagram = unique.some(isInstagramUrl);
+    if (hasInstagram && !instagramSessionId && !instagramCookieFilePath) {
+      pushToast(
+        '链接中包含 Instagram 地址，但未配置登录态（sessionid / cookies.txt）。Instagram 链接可能会解析失败。',
+        'error',
+      );
+      setIsSessionIdHelpOpen(true);
       return;
     }
 
@@ -781,7 +823,8 @@ export default function App() {
       setInstagramBridgeCookiePath(bridgePath);
 
       pushToast(`已采集 ${urls.length} 条 Instagram 内容。`, 'success');
-      await handleResolveAll(urls, bridgePath || undefined);
+      // Automated flow: resolve then auto-download at the chosen batch quality.
+      await handleResolveAll(urls, bridgePath || undefined, true);
     } catch (err) {
       reportError(getTauriErrorMessage(err, 'Instagram 采集失败'));
       setIsResolving(false);
@@ -790,9 +833,16 @@ export default function App() {
 
   // Resolve one or many links, then let the user pick a quality per video.
   // Cards stream in as each link resolves so a slow link can't block the rest.
-  async function handleResolveAll(targetUrls: string[], cookieFilePathOverride?: string) {
+  async function handleResolveAll(
+    targetUrls: string[],
+    cookieFilePathOverride?: string,
+    autoBatch = false,
+  ) {
     const session = (resolveSessionRef.current += 1);
     const isActive = () => resolveSessionRef.current === session;
+    // In the fully-automated Instagram flow we collect the resolved videos and
+    // auto-download them at the chosen quality instead of opening the drawer.
+    const resolvedEntries: { url: string; resolved: ResolveMediaResponse }[] = [];
     // A non-Instagram run clears any stale collector bridge so its cookies don't
     // leak into x.com / pornhub downloads.
     if (cookieFilePathOverride === undefined) {
@@ -835,8 +885,12 @@ export default function App() {
           return;
         }
         patchResolvedItem(targetUrl, { status: 'ready', resolved: result });
-        // Auto-expand the first video that becomes ready.
-        setExpandedUrl((current) => current ?? targetUrl);
+        resolvedEntries.push({ url: targetUrl, resolved: result });
+        // Auto-expand the first ready video — skipped in the auto-download flow
+        // so the drawer doesn't pop up repeatedly.
+        if (!autoBatch) {
+          setExpandedUrl((current) => current ?? targetUrl);
+        }
         successCount += 1;
         lastFormatCount = result.formats.length;
         void loadPreview(targetUrl, result);
@@ -854,7 +908,7 @@ export default function App() {
       return;
     }
 
-    if (successCount > 0) {
+    if (successCount > 0 && !autoBatch && !autoDownload) {
       pushToast(
         successCount > 1
           ? `解析完成：${successCount} 个视频，逐个选择清晰度后下载。`
@@ -866,39 +920,35 @@ export default function App() {
       reportError(`以下链接解析失败：${failures.join('；')}`);
     }
     setIsResolving(false);
+
+    // Auto-download: triggered by the Instagram collector flow (autoBatch) or
+    // by the user's persistent auto-download toggle. Downloads every resolved
+    // video at the chosen batch quality without per-video picking.
+    const shouldAutoDownload = (autoBatch || autoDownload) && resolvedEntries.length > 0;
+    if (shouldAutoDownload) {
+      await enqueueResolvedBatch(resolvedEntries, batchQuality);
+    }
   }
 
-  // Download every ready video at once using a single quality preference, so the
-  // user doesn't have to open each card and pick a version (handy for 50 reels).
-  async function handleDownloadAll() {
-    const targets = resolvedItems.filter(
-      (item) =>
-        item.resolved &&
-        item.status !== 'loading' &&
-        item.status !== 'failed' &&
-        item.status !== 'selected',
-    );
-    if (targets.length === 0) {
-      pushToast('没有可批量下载的视频。', 'info');
-      return;
-    }
-
+  // Enqueue a set of resolved videos at one quality preference. Shared by the
+  // manual "download all" button and the Instagram auto-download flow.
+  async function enqueueResolvedBatch(
+    entries: { url: string; resolved: ResolveMediaResponse }[],
+    quality: BatchQuality,
+  ): Promise<number> {
     let ok = 0;
-    for (const item of targets) {
-      if (!item.resolved) {
-        continue;
-      }
-      const format = pickFormatForStrategy(item.resolved, batchQuality);
+    for (const entry of entries) {
+      const format = pickFormatForStrategy(entry.resolved, quality);
       const result = await enqueueDownload(
-        item.url,
-        item.resolved,
+        entry.url,
+        entry.resolved,
         format,
-        deriveSessionLabel(item.url, item.resolved),
+        deriveSessionLabel(entry.url, entry.resolved),
         false,
       );
       if (result.ok) {
         ok += 1;
-        patchResolvedItem(item.url, {
+        patchResolvedItem(entry.url, {
           status: 'selected',
           selectedLabel: cleanFormatLabel(format.label),
         });
@@ -906,9 +956,29 @@ export default function App() {
     }
 
     pushToast(
-      `已批量加入下载：${ok}/${targets.length} 个（${batchQualityLabel(batchQuality)}）`,
+      `已批量加入下载：${ok}/${entries.length} 个（${batchQualityLabel(quality)}）`,
       ok > 0 ? 'success' : 'error',
     );
+    return ok;
+  }
+
+  // Download every ready video at once using a single quality preference, so the
+  // user doesn't have to open each card and pick a version (handy for 50 reels).
+  async function handleDownloadAll() {
+    const targets = resolvedItems
+      .filter(
+        (item) =>
+          item.resolved &&
+          item.status !== 'loading' &&
+          item.status !== 'failed' &&
+          item.status !== 'selected',
+      )
+      .map((item) => ({ url: item.url, resolved: item.resolved as ResolveMediaResponse }));
+    if (targets.length === 0) {
+      pushToast('没有可批量下载的视频。', 'info');
+      return;
+    }
+    await enqueueResolvedBatch(targets, batchQuality);
   }
 
   async function handleDownload(item: ResolveItem, format: MediaFormat) {
@@ -958,6 +1028,8 @@ export default function App() {
             sessionLabel,
             status: 'queued',
             progress: '0%',
+            sourceUrl: targetUrl,
+            formatId: format.id ?? null,
           },
           ...current.current,
         ],
@@ -985,6 +1057,59 @@ export default function App() {
       pushToast(`正在取消：${summarizeTitle(row.title)}`, 'info');
     } catch (err) {
       reportError(getTauriErrorMessage(err, '取消下载失败'));
+    }
+  }
+
+  async function handleBatchRetry() {
+    const retryable = [...downloadState.current, ...downloadState.history].filter(
+      (row) => selectedRetryIds.has(row.id) && row.sourceUrl,
+    );
+    if (retryable.length === 0) {
+      return;
+    }
+
+    let ok = 0;
+    const failures: string[] = [];
+    for (const row of retryable) {
+      try {
+        const taskId = await startDownload(
+          row.sourceUrl!,
+          row.formatId ?? null,
+          row.title,
+          selectedCookieSource,
+          instagramBridgeCookiePath || cookieFilePath,
+        );
+        setDownloadState((current) => ({
+          ...current,
+          current: [
+            {
+              id: taskId,
+              title: row.title,
+              sessionLabel: row.sessionLabel,
+              status: 'queued',
+              progress: '0%',
+              sourceUrl: row.sourceUrl,
+              formatId: row.formatId,
+            },
+            ...current.current,
+          ],
+        }));
+        ok += 1;
+      } catch (err) {
+        failures.push(`${summarizeTitle(row.title)}: ${getTauriErrorMessage(err, '重试失败')}`);
+      }
+    }
+
+    setSelectedRetryIds(new Set());
+    if (ok > 0) {
+      setDownloadTab('current');
+      pushToast(
+        `已重新加入 ${ok} 个下载任务${failures.length > 0 ? `，${failures.length} 个失败` : ''}`,
+        failures.length === 0 ? 'success' : 'error',
+      );
+    }
+    if (failures.length > 0 && ok === 0) {
+      reportError(`批量重试全部失败：${failures.join('；')}`);
     }
   }
 
@@ -1159,21 +1284,26 @@ export default function App() {
                   共 {resolvedItems.length} 个视频 · 选一次画质即可全部下载
                 </Text>
                 <div className="batch-bar-controls">
-                  <Picker
+                  <select
+                    className="batch-select"
                     aria-label="批量下载画质"
-                    selectedKey={batchQuality}
-                    onSelectionChange={(key) => setBatchQuality(key as BatchQuality)}
-                    items={BATCH_QUALITY_OPTIONS}
+                    value={batchQuality}
+                    onChange={(event) => setBatchQuality(event.target.value as BatchQuality)}
                   >
-                    {(item) => <PickerItem>{item.label}</PickerItem>}
-                  </Picker>
-                  <Button
-                    variant="accent"
-                    isDisabled={batchTargetCount === 0}
-                    onPress={() => void handleDownloadAll()}
+                    {BATCH_QUALITY_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="batch-download-btn"
+                    disabled={batchTargetCount === 0}
+                    onClick={() => void handleDownloadAll()}
                   >
                     下载全部（{batchTargetCount}）
-                  </Button>
+                  </button>
                 </div>
               </div>
             ) : null}
@@ -1221,6 +1351,21 @@ export default function App() {
             >
               历史记录
             </button>
+            {(() => {
+              const retryCount = mergeRowsById(downloadState.current, downloadState.history)
+                .filter((r) => ['failed', 'canceled'].includes(r.status) && r.sourceUrl).length;
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={downloadTab === 'retry'}
+                  className={`download-tab${downloadTab === 'retry' ? ' is-active' : ''}`}
+                  onClick={() => setDownloadTab('retry')}
+                >
+                  失败重试{retryCount > 0 ? `（${retryCount}）` : ''}
+                </button>
+              );
+            })()}
           </div>
 
           {downloadTab === 'current' ? (
@@ -1233,7 +1378,7 @@ export default function App() {
               onCancel={handleCancelDownload}
               onDelete={handleRemoveCurrentRow}
             />
-          ) : (
+          ) : downloadTab === 'history' ? (
             <DownloadsTable
               mode="history"
               ariaLabel="下载历史"
@@ -1242,6 +1387,38 @@ export default function App() {
               onOpenLocation={handleOpenLocation}
               onDelete={handleDeleteHistoryRow}
             />
+          ) : (
+            (() => {
+              const retryableRows = mergeRowsById(downloadState.current, downloadState.history)
+                .filter((r) => ['failed', 'canceled'].includes(r.status) && r.sourceUrl);
+              return (
+                <>
+                  <DownloadsTable
+                    mode="history"
+                    ariaLabel="可重试的下载"
+                    emptyText="没有失败或已取消的下载任务。"
+                    rows={retryableRows}
+                    onOpenLocation={handleOpenLocation}
+                    onDelete={handleDeleteHistoryRow}
+                    selectable
+                    selectedIds={selectedRetryIds}
+                    onSelectionChange={setSelectedRetryIds}
+                  />
+                  {retryableRows.length > 0 ? (
+                    <div className="dl-batch-retry">
+                      <button
+                        type="button"
+                        className="batch-download-btn"
+                        disabled={selectedRetryIds.size === 0}
+                        onClick={() => void handleBatchRetry()}
+                      >
+                        批量重试（{selectedRetryIds.size}）
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()
           )}
         </section>
 
@@ -1274,6 +1451,7 @@ export default function App() {
         instagramCookieFilePath={instagramCookieFilePath}
         instagramCollectMode={instagramCollectMode}
         instagramCollectCount={instagramCollectCount}
+        autoDownload={autoDownload}
         dependencyStatus={dependencyStatus}
         downloadDirectory={downloadDirectorySettings}
         downloadDirectoryDraft={downloadDirectoryDraft}
@@ -1284,9 +1462,15 @@ export default function App() {
         onInstagramCookieFilePathChange={handleInstagramCookieFilePathChange}
         onInstagramCollectModeChange={handleInstagramCollectModeChange}
         onInstagramCollectCountChange={handleInstagramCollectCountChange}
+        onAutoDownloadChange={handleAutoDownloadChange}
         onDownloadDirectoryDraftChange={setDownloadDirectoryDraft}
         onSaveDownloadDirectory={handleSaveDownloadDirectory}
         onResetDownloadDirectory={handleResetDownloadDirectory}
+      />
+
+      <SessionIdHelpDrawer
+        open={isSessionIdHelpOpen}
+        onClose={() => setIsSessionIdHelpOpen(false)}
       />
     </>
   );

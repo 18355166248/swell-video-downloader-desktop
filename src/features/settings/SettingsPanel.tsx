@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Button, Heading, Picker, PickerItem, StatusLight, Text, TextField } from '@react-spectrum/s2';
 import { CookieSourcePanel } from '../cookies/CookieSourcePanel';
 import { SessionIdHelpDrawer } from './SessionIdHelpDrawer';
@@ -23,6 +24,7 @@ export type SettingsPanelProps = {
   instagramCookieFilePath: string;
   instagramCollectMode: InstagramCollectMode;
   instagramCollectCount: string;
+  autoDownload: boolean;
   dependencyStatus: DependencyStatus | null;
   downloadDirectory: DownloadDirectorySettings | null;
   downloadDirectoryDraft: string;
@@ -33,12 +35,15 @@ export type SettingsPanelProps = {
   onInstagramCookieFilePathChange: (value: string) => void;
   onInstagramCollectModeChange: (value: InstagramCollectMode) => void;
   onInstagramCollectCountChange: (value: string) => void;
+  onAutoDownloadChange: (value: boolean) => void;
   onDownloadDirectoryDraftChange: (value: string) => void;
   onSaveDownloadDirectory: () => void;
   onResetDownloadDirectory: () => void;
 };
 
 export function SettingsPanel(props: SettingsPanelProps) {
+  const [isSessionIdHelpOpen, setIsSessionIdHelpOpen] = useState(false);
+
   return (
           <div className="panel-stack settings-panel-stack">
             <CookieSourcePanel
@@ -51,8 +56,17 @@ export function SettingsPanel(props: SettingsPanelProps) {
             <div className="instagram-settings panel-stack">
               <div className="instagram-settings-head">
                 <Heading level={4} UNSAFE_className="settings-subtitle">Instagram 访问</Heading>
-                <SessionIdHelpDrawer />
+                <Button
+                  variant="secondary"
+                  onPress={() => setIsSessionIdHelpOpen(true)}
+                >
+                  如何获取？
+                </Button>
               </div>
+              <SessionIdHelpDrawer
+                open={isSessionIdHelpOpen}
+                onClose={() => setIsSessionIdHelpOpen(false)}
+              />
               <Text UNSAFE_className="settings-hint">
                 主推荐粘贴 sessionid；cookies.txt 作为备用登录方案。
               </Text>
@@ -89,6 +103,20 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 placeholder="例如 1、3、5"
               />
             </div>
+            <label className="auto-download-toggle">
+              <span className="auto-download-toggle-text">
+                <Text UNSAFE_className="auto-download-label">自动下载</Text>
+                <Text UNSAFE_className="auto-download-hint">
+                  解析完成后自动以所选画质加入下载队列
+                </Text>
+              </span>
+              <input
+                type="checkbox"
+                className="auto-download-switch"
+                checked={props.autoDownload}
+                onChange={(event) => props.onAutoDownloadChange(event.target.checked)}
+              />
+            </label>
             <div className="download-dir-settings">
               <TextField
                 label="下载目录"

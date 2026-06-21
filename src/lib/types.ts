@@ -46,6 +46,7 @@ export type DiagnosticErrorCategory =
   | 'cookie_file_missing'
   | 'proxy_or_network'
   | 'login_or_access_required'
+  | 'audience_restricted'
   | 'geo_restricted'
   | 'extractor_changed'
   | 'unknown';
@@ -114,4 +115,5 @@ export type AppSettings = {
   instagramCookieFilePath: string;
   instagramCollectMode: InstagramCollectMode;
   instagramCollectCount: string;
+  autoDownload: boolean;
 };
