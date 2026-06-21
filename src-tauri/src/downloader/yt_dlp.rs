@@ -9,6 +9,7 @@ use std::{
 use tauri::AppHandle;
 
 use crate::platform::binaries::resolve_yt_dlp;
+use crate::platform::spawn::hide_console_window;
 
 /// Upper bound on a single yt-dlp metadata probe. Without it a stuck yt-dlp (slow
 /// network extraction, a wedged `--cookies-from-browser` read) would hang resolve
@@ -83,10 +84,19 @@ pub fn probe_metadata(
     cookie_source: Option<&str>,
     cookie_file_path: Option<&str>,
 ) -> Result<MetadataProbeSuccess, MetadataProbeFailure> {
+    log::info!(
+        "[probe_metadata] url={url} cookie_source={:?} cookie_file_path={:?}",
+        cookie_source,
+        cookie_file_path
+    );
     let binary = resolve_yt_dlp(app);
     let cookie_mode = current_cookie_mode(cookie_source);
     let detected_proxy = detected_proxy();
     let proxy_enabled = detected_proxy.is_some();
+    log::info!(
+        "[probe_metadata] cookie_mode={cookie_mode} proxy_enabled={proxy_enabled} yt_dlp_found={}",
+        binary.is_some()
+    );
     let program = binary
         .as_ref()
         .map(|item| item.path.display().to_string())
@@ -103,34 +113,47 @@ pub fn probe_metadata(
         .map(|item| item.source.to_string())
         .unwrap_or_else(|| "missing".into());
 
-    let binary = resolve_yt_dlp(app).ok_or_else(|| MetadataProbeFailure {
-        error_info: classify_yt_dlp_error(
-            "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。",
-        ),
-        raw_message: "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。"
-            .into(),
-        yt_dlp_source: yt_dlp_source.clone(),
-        proxy_enabled,
-        cookie_mode: cookie_mode.clone(),
-        command_preview: command_preview.clone(),
-    })?;
-
-    let mut command = Command::new(&binary.path);
-    command.arg("-J");
-    apply_proxy(&mut command);
-    apply_cookie_source(&mut command, Some(cookie_mode.as_str()), cookie_file_path).map_err(
-        |raw_message| MetadataProbeFailure {
-            error_info: classify_yt_dlp_error(&raw_message),
-            raw_message,
+    let binary = resolve_yt_dlp(app).ok_or_else(|| {
+        log::error!("[probe_metadata] yt-dlp binary not found");
+        MetadataProbeFailure {
+            error_info: classify_yt_dlp_error(
+                "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。",
+            ),
+            raw_message: "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。"
+                .into(),
             yt_dlp_source: yt_dlp_source.clone(),
             proxy_enabled,
             cookie_mode: cookie_mode.clone(),
             command_preview: command_preview.clone(),
+        }
+    })?;
+
+    let mut command = Command::new(&binary.path);
+    hide_console_window(&mut command);
+    command.arg("-J");
+    apply_proxy(&mut command);
+    apply_cookie_source(&mut command, Some(cookie_mode.as_str()), cookie_file_path).map_err(
+        |raw_message| {
+            log::error!("[probe_metadata] cookie setup failed: {raw_message}");
+            MetadataProbeFailure {
+                error_info: classify_yt_dlp_error(&raw_message),
+                raw_message,
+                yt_dlp_source: yt_dlp_source.clone(),
+                proxy_enabled,
+                cookie_mode: cookie_mode.clone(),
+                command_preview: command_preview.clone(),
+            }
         },
     )?;
     command.arg(url);
 
+    log::info!(
+        "[probe_metadata] running yt-dlp with args: {:?}",
+        command.get_args().collect::<Vec<_>>()
+    );
+
     let output = output_with_timeout(command, YT_DLP_METADATA_TIMEOUT).map_err(|raw_message| {
+        log::error!("[probe_metadata] yt-dlp execution failed: {raw_message}");
         MetadataProbeFailure {
             error_info: classify_yt_dlp_error(&raw_message),
             raw_message,
@@ -143,6 +166,7 @@ pub fn probe_metadata(
 
     if !output.status.success() {
         let raw_message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        log::error!("[probe_metadata] yt-dlp exited with error: {raw_message}");
         return Err(MetadataProbeFailure {
             error_info: classify_yt_dlp_error(&raw_message),
             raw_message,
@@ -153,8 +177,9 @@ pub fn probe_metadata(
         });
     }
 
-    let metadata = serde_json::from_slice(&output.stdout).map_err(|err| {
+    let metadata: YtDlpMetadata = serde_json::from_slice(&output.stdout).map_err(|err| {
         let raw_message = format!("解析 yt-dlp 输出失败：{err}");
+        log::error!("[probe_metadata] JSON parse failed: {err}");
         MetadataProbeFailure {
             error_info: classify_yt_dlp_error(&raw_message),
             raw_message,
@@ -165,6 +190,11 @@ pub fn probe_metadata(
         }
     })?;
 
+    log::info!(
+        "[probe_metadata] success: title={:?} formats_count={}",
+        metadata.title,
+        metadata.formats.as_ref().map_or(0, Vec::len)
+    );
     Ok(MetadataProbeSuccess {
         metadata,
         yt_dlp_source,
@@ -268,73 +298,55 @@ pub fn normalize_yt_dlp_error(raw: String) -> String {
 pub fn classify_yt_dlp_error(raw: &str) -> YtDlpErrorInfo {
     let trimmed = raw.trim();
     let lower = trimmed.to_ascii_lowercase();
+    let result;
 
     if trimmed.contains("未找到 yt-dlp") {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "binary_missing".into(),
             normalized_message: trimmed.to_string(),
         };
-    }
-
-    if trimmed.contains("无法启动 yt-dlp") {
-        return YtDlpErrorInfo {
+    } else if trimmed.contains("无法启动 yt-dlp") {
+        result = YtDlpErrorInfo {
             error_category: "spawn_failed".into(),
             normalized_message: "无法启动 yt-dlp，请检查可执行文件路径和权限。".into(),
         };
-    }
-
-    if trimmed.contains("yt-dlp 解析超时") {
-        return YtDlpErrorInfo {
+    } else if trimmed.contains("yt-dlp 解析超时") {
+        result = YtDlpErrorInfo {
             error_category: "timeout".into(),
             normalized_message: trimmed.to_string(),
         };
-    }
-
-    if trimmed.contains("Could not copy Chrome cookie database") {
-        return YtDlpErrorInfo {
+    } else if trimmed.contains("Could not copy Chrome cookie database") {
+        result = YtDlpErrorInfo {
             error_category: "cookie_locked".into(),
             normalized_message: "无法读取 Chrome Cookie：Chrome 当前正在占用 Cookies 数据库。请先完全关闭 Chrome 后重试，或后续改用手动导入 Cookie。".into(),
         };
-    }
-
-    if trimmed.contains("Could not copy Edge cookie database") {
-        return YtDlpErrorInfo {
+    } else if trimmed.contains("Could not copy Edge cookie database") {
+        result = YtDlpErrorInfo {
             error_category: "cookie_locked".into(),
             normalized_message: "无法读取 Edge Cookie：Edge 当前正在占用 Cookies 数据库。请先完全关闭 Edge 后重试，或后续改用手动导入 Cookie。".into(),
         };
-    }
-
-    if trimmed.contains("cookies.txt 文件不存在") || trimmed.contains("已选择手动导入 Cookie") {
-        return YtDlpErrorInfo {
+    } else if trimmed.contains("cookies.txt 文件不存在") || trimmed.contains("已选择手动导入 Cookie") {
+        result = YtDlpErrorInfo {
             error_category: "cookie_file_missing".into(),
             normalized_message: trimmed.to_string(),
         };
-    }
-
-    if lower.contains("geo restricted")
+    } else if lower.contains("geo restricted")
         || lower.contains("not available from your location")
         || trimmed.contains("地区")
     {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "geo_restricted".into(),
             normalized_message: "当前内容可能受地区限制，需切换可访问的网络环境后再试。".into(),
         };
-    }
-
-    // Content the logged-in account simply isn't allowed to see (audience /
-    // visibility limited). Distinct from "not logged in" — adding a sessionid
-    // won't help unless it's an account with access.
-    if lower.contains("isn't available to everyone")
+    } else if lower.contains("isn't available to everyone")
         || lower.contains("can't be seen by certain audiences")
         || lower.contains("certain audiences")
     {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "audience_restricted".into(),
             normalized_message: "该 Instagram 内容设置了受众/可见性限制，当前登录账号无权查看，无法下载。可换一个有访问权限的账号 sessionid 再试。".into(),
         };
-    }
-
-    if lower.contains("login")
+    } else if lower.contains("login")
         || lower.contains("sign in")
         || lower.contains("members only")
         || lower.contains("private video")
@@ -347,13 +359,11 @@ pub fn classify_yt_dlp_error(raw: &str) -> YtDlpErrorInfo {
         || trimmed.contains("年龄")
         || trimmed.contains("登录")
     {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "login_or_access_required".into(),
             normalized_message: "当前内容需要登录态才能解析。Instagram 请在设置「Instagram 访问」里粘贴 sessionid（或提供 cookies.txt）；其他站点可改用浏览器 Cookie 或导入 cookies.txt 后重试。".into(),
         };
-    }
-
-    if lower.contains("proxy")
+    } else if lower.contains("proxy")
         || lower.contains("connection")
         || lower.contains("timed out")
         || lower.contains("network is unreachable")
@@ -361,32 +371,38 @@ pub fn classify_yt_dlp_error(raw: &str) -> YtDlpErrorInfo {
         || lower.contains("connection refused")
         || lower.contains("ssl")
     {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "proxy_or_network".into(),
             normalized_message: "连接目标站点或媒体资源失败，请检查代理、网络环境或证书配置。".into(),
         };
-    }
-
-    if lower.contains("unsupported url")
+    } else if lower.contains("unsupported url")
         || lower.contains("unable to extract")
         || lower.contains("extractor")
         || lower.contains("no video formats found")
         || trimmed.contains("解析 yt-dlp 输出失败")
     {
-        return YtDlpErrorInfo {
+        result = YtDlpErrorInfo {
             error_category: "extractor_changed".into(),
             normalized_message: "yt-dlp 当前未能正确提取该页面，可能需要更新 extractor 或排查页面结构变化。".into(),
         };
+    } else {
+        result = YtDlpErrorInfo {
+            error_category: "unknown".into(),
+            normalized_message: if trimmed.is_empty() {
+                "未知错误，请查看日志或终端复现命令继续排查。".into()
+            } else {
+                trimmed.to_string()
+            },
+        };
     }
 
-    YtDlpErrorInfo {
-        error_category: "unknown".into(),
-        normalized_message: if trimmed.is_empty() {
-            "未知错误，请查看日志或终端复现命令继续排查。".into()
-        } else {
-            trimmed.to_string()
-        },
-    }
+    log::info!(
+        "[classify_error] category={} raw_len={} raw_first_200={:?}",
+        result.error_category,
+        trimmed.len(),
+        &trimmed[..trimmed.len().min(200)]
+    );
+    result
 }
 
 pub fn build_metadata_probe(
@@ -467,13 +483,17 @@ fn cookie_args(
         .filter(|value| !value.is_empty())
     {
         if !Path::new(path).is_file() {
+            log::error!("[cookie_args] cookies.txt not found at: {path}");
             return Err("cookies.txt 文件不存在，请确认路径后重试。".into());
         }
 
+        log::info!("[cookie_args] using explicit cookies.txt: {path}");
         return Ok(vec!["--cookies".into(), path.to_string()]);
     }
 
-    match current_cookie_mode(cookie_source).as_str() {
+    let mode = current_cookie_mode(cookie_source);
+    log::info!("[cookie_args] cookie_mode={mode}");
+    match mode.as_str() {
         "chrome" => Ok(vec!["--cookies-from-browser".into(), "chrome".into()]),
         "edge" => Ok(vec!["--cookies-from-browser".into(), "edge".into()]),
         "import" => {

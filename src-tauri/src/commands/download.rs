@@ -21,6 +21,7 @@ use crate::{
     },
     events::download_events::{DOWNLOAD_ERROR, DOWNLOAD_PROGRESS, DOWNLOAD_STATUS},
     platform::binaries::{resolve_ffmpeg, resolve_yt_dlp},
+    platform::spawn::hide_console_window,
     downloader::yt_dlp::{apply_cookie_source, apply_proxy, normalize_yt_dlp_error},
 };
 
@@ -147,7 +148,7 @@ pub fn start_download(
     cookie_source: Option<String>,
     cookie_file_path: Option<String>,
 ) -> Result<String, String> {
-    eprintln!(
+    log::info!(
         "[start_download] url={url} format_id={:?} title={:?} cookie_source={:?} cookie_file_path={:?} requires_binary_toolchain={}",
         format_id,
         title,
@@ -156,7 +157,7 @@ pub fn start_download(
         requires_binary_toolchain(&url, format_id.as_deref())
     );
     if url.trim().is_empty() {
-        eprintln!("[start_download] rejected empty url");
+        log::error!("[start_download] rejected empty url");
         return Err("下载地址不能为空".into());
     }
 
@@ -176,7 +177,7 @@ pub fn start_download(
     );
 
     let download_dir = resolve_download_dir(&app)?;
-    eprintln!("[start_download] resolved download_dir={}", download_dir.display());
+    log::info!("[start_download] resolved download_dir={}", download_dir.display());
 
     let app_handle = app.clone();
     let return_task_id = task_id.clone();
@@ -185,7 +186,7 @@ pub fn start_download(
         task_title.clone(),
         cancel_requested.clone(),
     )?;
-    eprintln!("[start_download] registered task_id={task_id} title={task_title}");
+    log::info!("[start_download] registered task_id={task_id} title={task_title}");
     thread::spawn(move || {
         let result = run_download_task(
             app_handle.clone(),
@@ -200,7 +201,7 @@ pub fn start_download(
         );
         unregister_download_task(&task_id);
         if let Err(message) = result {
-            eprintln!("[start_download] task_id={task_id} failed: {message}");
+            log::error!("[start_download] task_id={task_id} failed: {message}");
             if message == "下载已取消" {
                 emit_status(
                     &app_handle,
@@ -293,7 +294,7 @@ fn run_download_task(
     download_dir: PathBuf,
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    eprintln!(
+    log::info!(
         "[run_download_task] task_id={task_id} url={url} format_id={:?} title={title}",
         format_id
     );
@@ -311,7 +312,7 @@ fn run_download_task(
 
     if url.contains("x.com") {
         if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
-            eprintln!(
+            log::info!(
                 "[run_download_task] task_id={task_id} using ssstwitter selection label={} direct_url_present={}",
                 selection.label,
                 selection.direct_url.is_some()
@@ -326,23 +327,24 @@ fn run_download_task(
                 cancel_requested,
             );
         }
-        eprintln!("[run_download_task] task_id={task_id} x.com url but no ssstwitter selection decoded");
+        log::info!("[run_download_task] task_id={task_id} x.com url but no ssstwitter selection decoded");
     }
 
     let yt_dlp = resolve_yt_dlp(&app).ok_or_else(|| {
-        eprintln!("[run_download_task] task_id={task_id} yt-dlp not found");
+        log::error!("[run_download_task] task_id={task_id} yt-dlp not found");
         "未找到 yt-dlp。请将其放到 resources/bin 目录，或通过 SWELL_YTDLP_PATH 指定路径。"
             .to_string()
     })?;
-    eprintln!("[run_download_task] task_id={task_id} yt_dlp={}", yt_dlp.path.display());
+    log::info!("[run_download_task] task_id={task_id} yt_dlp={} source={}", yt_dlp.path.display(), yt_dlp.source);
     let ffmpeg = resolve_ffmpeg(&app).ok_or_else(|| {
-        eprintln!("[run_download_task] task_id={task_id} ffmpeg not found");
+        log::error!("[run_download_task] task_id={task_id} ffmpeg not found");
         "未找到 ffmpeg。请将其放到 resources/bin 目录，或通过 SWELL_FFMPEG_PATH 指定路径。"
             .to_string()
     })?;
-    eprintln!("[run_download_task] task_id={task_id} ffmpeg={}", ffmpeg.path.display());
+    log::info!("[run_download_task] task_id={task_id} ffmpeg={} source={}", ffmpeg.path.display(), ffmpeg.source);
 
     let mut command = Command::new(&yt_dlp.path);
+    hide_console_window(&mut command);
     apply_download_progress_args(&mut command);
     command.arg("--print");
     command.arg("after_move:__FINAL_PATH__:%(filepath)s");
@@ -359,6 +361,7 @@ fn run_download_task(
     }
 
     apply_proxy(&mut command);
+    log::info!("[run_download_task] task_id={task_id} cookie_source={:?} cookie_file_path={:?}", cookie_source, cookie_file_path);
     apply_cookie_source(
         &mut command,
         cookie_source.as_deref(),
@@ -374,10 +377,20 @@ fn run_download_task(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
+    // Log the full command for debugging (mask cookie values for security).
+    log::info!(
+        "[run_download_task] task_id={task_id} yt-dlp args: {:?}",
+        command.get_args().collect::<Vec<_>>().iter().map(|a| {
+            let s = a.to_string_lossy().to_string();
+            // Mask sessionid-like values in cookies file paths
+            if s.contains("sessionid") || s.contains("cookie") { s } else { s }
+        }).collect::<Vec<_>>()
+    );
+
     let mut child = command
         .spawn()
         .map_err(|err| {
-            eprintln!("[run_download_task] task_id={task_id} failed to spawn yt-dlp: {err}");
+            log::error!("[run_download_task] task_id={task_id} failed to spawn yt-dlp: {err}");
             format!("启动下载任务失败：{err}")
         })?;
 
@@ -394,6 +407,7 @@ fn run_download_task(
 
     let final_path = Arc::new(Mutex::new(None::<String>));
     let last_error = Arc::new(Mutex::new(None::<String>));
+    let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -404,8 +418,9 @@ fn run_download_task(
         let title = title.clone();
         let final_path = final_path.clone();
         let last_error = last_error.clone();
+        let stderr_lines = stderr_lines.clone();
         thread::spawn(move || {
-            pump_reader(reader, &app, &task_id, &title, &final_path, &last_error);
+            pump_reader(reader, &app, &task_id, &title, &final_path, &last_error, &stderr_lines);
         })
     });
 
@@ -415,8 +430,9 @@ fn run_download_task(
         let title = title.clone();
         let final_path = final_path.clone();
         let last_error = last_error.clone();
+        let stderr_lines = stderr_lines.clone();
         thread::spawn(move || {
-            pump_reader(reader, &app, &task_id, &title, &final_path, &last_error);
+            pump_reader(reader, &app, &task_id, &title, &final_path, &last_error, &stderr_lines);
         })
     });
 
@@ -454,6 +470,7 @@ fn run_download_task(
         .and_then(|value| value.clone());
 
     if status.success() {
+        log::info!("[run_download_task] task_id={task_id} completed successfully");
         // Sort the finished file into its resource-type subfolder by extension.
         let output_path = output_path.map(|path| relocate_into_category(&path, &site_dir));
         emit_status(
@@ -474,6 +491,18 @@ fn run_download_task(
             .and_then(|value| value.clone())
             .map(normalize_yt_dlp_error)
             .unwrap_or_else(|| "下载失败，请查看日志输出".into());
+
+        // Dump the full yt-dlp output so post-mortem analysis has the context.
+        if let Ok(lines) = stderr_lines.lock() {
+            log::error!(
+                "[run_download_task] task_id={task_id} yt-dlp exited with code {:?}, full output ({} lines):",
+                status.code(),
+                lines.len()
+            );
+            for line in lines.iter() {
+                log::error!("[yt-dlp raw] task_id={task_id} {line}");
+            }
+        }
 
         emit_error(
             &app,
@@ -496,9 +525,10 @@ fn pump_reader<R: Read>(
     title: &str,
     final_path: &Arc<Mutex<Option<String>>>,
     last_error: &Arc<Mutex<Option<String>>>,
+    stderr_lines: &Arc<Mutex<Vec<String>>>,
 ) {
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
-        handle_download_line(app, task_id, title, &line, final_path, last_error);
+        handle_download_line(app, task_id, title, &line, final_path, last_error, stderr_lines);
     }
 }
 
@@ -509,6 +539,7 @@ fn handle_download_line(
     line: &str,
     final_path: &Arc<Mutex<Option<String>>>,
     last_error: &Arc<Mutex<Option<String>>>,
+    stderr_lines: &Arc<Mutex<Vec<String>>>,
 ) {
     if let Some(payload) = line.strip_prefix("__PROGRESS__:") {
         let mut parts = payload.split('|');
@@ -526,6 +557,12 @@ fn handle_download_line(
             },
         );
         return;
+    }
+
+    // Accumulate all non-progress lines for debugging (yt-dlp writes diagnostics,
+    // warnings, and errors to stderr; some useful context also goes to stdout).
+    if let Ok(mut lines) = stderr_lines.lock() {
+        lines.push(line.to_string());
     }
 
     if let Some(path) = line.strip_prefix("__FINAL_PATH__:") {
@@ -550,6 +587,7 @@ fn handle_download_line(
     }
 
     if line.contains("ERROR:") {
+        log::error!("[yt-dlp] task_id={task_id} {line}");
         if let Ok(mut stored) = last_error.lock() {
             *stored = Some(line.trim().to_string());
         }
@@ -645,7 +683,7 @@ fn run_ssstwitter_download_task(
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let selection_label = selection.label.as_str();
-    eprintln!(
+    log::info!(
         "[run_ssstwitter_download_task] task_id={task_id} selection_label={selection_label} direct_url_present={}",
         selection.direct_url.is_some()
     );

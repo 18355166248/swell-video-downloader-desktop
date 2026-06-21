@@ -9,6 +9,9 @@
 #[cfg(windows)]
 use std::process::Command;
 
+#[cfg(windows)]
+use crate::platform::spawn::hide_console_window;
+
 /// Returns a proxy URL (e.g. `http://127.0.0.1:7897`) to route requests through,
 /// preferring the standard env vars and falling back to the Windows system proxy.
 pub fn detect_proxy() -> Option<String> {
@@ -62,7 +65,9 @@ fn windows_system_proxy() -> Option<String> {
 
 #[cfg(windows)]
 fn reg_query(key: &str, value: &str) -> Option<String> {
-    let output = Command::new("reg")
+    let mut cmd = Command::new("reg");
+    hide_console_window(&mut cmd);
+    let output = cmd
         .args(["query", key, "/v", value])
         .output()
         .ok()?;

@@ -8,6 +8,7 @@ use tauri::AppHandle;
 use crate::{
     downloader::x_ssstwitter::{download_selection_to_path, extract_ssstwitter_selection},
     platform::binaries::resolve_ffmpeg,
+    platform::spawn::hide_console_window,
 };
 
 /// ssstwitter never returns a poster image, so we synthesize a preview frame:
@@ -59,7 +60,9 @@ fn generate_preview_blocking(app: AppHandle, url: String, format_id: String) -> 
         |_downloaded, _total| {},
     )?;
 
-    let output = Command::new(&ffmpeg.path)
+    let mut ffmpeg_cmd = Command::new(&ffmpeg.path);
+    hide_console_window(&mut ffmpeg_cmd);
+    let output = ffmpeg_cmd
         .arg("-y")
         .arg("-i")
         .arg(&clip_path)

@@ -64,9 +64,13 @@ export function TitleBar() {
 
       <header className="titlebar" data-tauri-drag-region>
         <div className="titlebar-brand" data-tauri-drag-region>
-          <span className="brand-mark" aria-hidden="true">
-            S
-          </span>
+          <img
+            src="/app-icon.png"
+            alt=""
+            className="brand-icon"
+            aria-hidden="true"
+            draggable={false}
+          />
           <span className="brand-name">
             Swell <em>Video</em> Downloader
           </span>
