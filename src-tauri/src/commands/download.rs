@@ -8,7 +8,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -27,6 +27,47 @@ use crate::{
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SSSTWITTER_DOWNLOAD_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
 static DOWNLOAD_TASKS: OnceLock<Mutex<HashMap<String, DownloadTaskControl>>> = OnceLock::new();
+static DOWNLOAD_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+/// Cap on simultaneously running downloads. Batch actions (e.g. "download all 50")
+/// enqueue many tasks at once; without a cap they would each spawn a yt-dlp
+/// process immediately and swamp the network/CPU. Extra tasks wait as "queued".
+const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+
+fn download_permits() -> &'static (Mutex<usize>, Condvar) {
+    DOWNLOAD_PERMITS.get_or_init(|| (Mutex::new(MAX_CONCURRENT_DOWNLOADS), Condvar::new()))
+}
+
+/// Holds one download permit; releases it back to the pool on drop.
+struct DownloadPermit;
+
+impl Drop for DownloadPermit {
+    fn drop(&mut self) {
+        let (mutex, condvar) = download_permits();
+        if let Ok(mut available) = mutex.lock() {
+            *available += 1;
+            condvar.notify_one();
+        }
+    }
+}
+
+/// Acquire a permit, waiting while the pool is empty. Returns `None` if the task
+/// is canceled while still waiting in the queue.
+fn acquire_download_permit(cancel_requested: &AtomicBool) -> Option<DownloadPermit> {
+    let (mutex, condvar) = download_permits();
+    let mut available = mutex.lock().ok()?;
+    while *available == 0 {
+        if cancel_requested.load(Ordering::SeqCst) {
+            return None;
+        }
+        let (guard, _timeout) = condvar
+            .wait_timeout(available, Duration::from_millis(200))
+            .ok()?;
+        available = guard;
+    }
+    *available -= 1;
+    Some(DownloadPermit)
+}
 
 #[derive(Clone)]
 struct DownloadTaskControl {
@@ -253,6 +294,13 @@ fn run_download_task(
         "[run_download_task] task_id={task_id} url={url} format_id={:?} title={title}",
         format_id
     );
+    // Wait for a concurrency slot so batch downloads don't all start at once.
+    // The task stays "queued" (already emitted) until a permit frees up.
+    let _permit = match acquire_download_permit(&cancel_requested) {
+        Some(permit) => permit,
+        None => return Err("下载已取消".into()),
+    };
+
     // Land downloads under <base>/<site>/, then sort each finished file into a
     // resource-type subfolder (视频 / 图片 / 音频 / 其他) by its extension.
     let site_dir = site_target_dir(&download_dir, &url);

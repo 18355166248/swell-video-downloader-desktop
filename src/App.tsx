@@ -1,4 +1,4 @@
-import { Button, InlineAlert, Text } from '@react-spectrum/s2';
+import { Button, InlineAlert, Picker, PickerItem, Text } from '@react-spectrum/s2';
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
@@ -173,6 +173,55 @@ function buildDownloadTitle(baseTitle: string, format: MediaFormat): string {
   return baseTitle.includes(descriptor) ? baseTitle : `${baseTitle} - ${descriptor}`;
 }
 
+type BatchQuality = 'best' | 'smallest' | 'audio';
+
+const BATCH_QUALITY_OPTIONS: { id: BatchQuality; label: string }[] = [
+  { id: 'best', label: '最高画质' },
+  { id: 'smallest', label: '最低画质' },
+  { id: 'audio', label: '仅音频' },
+];
+
+const BATCH_AUDIO_EXTS = new Set(['m4a', 'mp3', 'aac', 'opus', 'ogg', 'wav', 'flac']);
+
+function batchQualityLabel(quality: BatchQuality): string {
+  return BATCH_QUALITY_OPTIONS.find((option) => option.id === quality)?.label ?? quality;
+}
+
+function formatHeight(label: string): number {
+  const match = label.match(/(\d+)\s*p/iu);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+// Map a one-time quality preference to the matching format of each video, since
+// same-site formats are essentially uniform — so the user picks once for a batch.
+function pickFormatForStrategy(
+  resolved: ResolveMediaResponse,
+  strategy: BatchQuality,
+): MediaFormat {
+  const { formats, recommendation } = resolved;
+  if (formats.length === 0) {
+    return recommendation;
+  }
+  if (strategy === 'audio') {
+    return formats.find((format) => BATCH_AUDIO_EXTS.has(format.ext.toLowerCase())) ?? recommendation;
+  }
+  if (strategy === 'smallest') {
+    const videos = formats.filter((format) => formatHeight(format.label) > 0);
+    const pool = videos.length > 0 ? videos : formats;
+    return pool.reduce((min, format) => {
+      const formatH = formatHeight(format.label);
+      const minH = formatHeight(min.label);
+      if (formatH !== minH) {
+        return formatH < minH ? format : min;
+      }
+      const formatSize = format.sizeBytes ?? Number.POSITIVE_INFINITY;
+      const minSize = min.sizeBytes ?? Number.POSITIVE_INFINITY;
+      return formatSize < minSize ? format : min;
+    });
+  }
+  return recommendation;
+}
+
 function parseBatchUrls(value: string): string[] {
   return value
     .split(/\r?\n/u)
@@ -310,6 +359,7 @@ export default function App() {
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [batchQuality, setBatchQuality] = useState<BatchQuality>('best');
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
   // Task ids the user removed from the list — late progress/status events for
   // these are ignored so a deleted row never re-appears.
@@ -818,6 +868,49 @@ export default function App() {
     setIsResolving(false);
   }
 
+  // Download every ready video at once using a single quality preference, so the
+  // user doesn't have to open each card and pick a version (handy for 50 reels).
+  async function handleDownloadAll() {
+    const targets = resolvedItems.filter(
+      (item) =>
+        item.resolved &&
+        item.status !== 'loading' &&
+        item.status !== 'failed' &&
+        item.status !== 'selected',
+    );
+    if (targets.length === 0) {
+      pushToast('没有可批量下载的视频。', 'info');
+      return;
+    }
+
+    let ok = 0;
+    for (const item of targets) {
+      if (!item.resolved) {
+        continue;
+      }
+      const format = pickFormatForStrategy(item.resolved, batchQuality);
+      const result = await enqueueDownload(
+        item.url,
+        item.resolved,
+        format,
+        deriveSessionLabel(item.url, item.resolved),
+        false,
+      );
+      if (result.ok) {
+        ok += 1;
+        patchResolvedItem(item.url, {
+          status: 'selected',
+          selectedLabel: cleanFormatLabel(format.label),
+        });
+      }
+    }
+
+    pushToast(
+      `已批量加入下载：${ok}/${targets.length} 个（${batchQualityLabel(batchQuality)}）`,
+      ok > 0 ? 'success' : 'error',
+    );
+  }
+
   async function handleDownload(item: ResolveItem, format: MediaFormat) {
     if (!item.resolved) {
       return;
@@ -987,6 +1080,13 @@ export default function App() {
       ? 3
       : 1;
   const diagnosticComparison = compareDiagnostics(previousDiagnosticResult, diagnosticResult);
+  const batchTargetCount = resolvedItems.filter(
+    (item) =>
+      item.resolved &&
+      item.status !== 'loading' &&
+      item.status !== 'failed' &&
+      item.status !== 'selected',
+  ).length;
 
   return (
     <>
@@ -1054,9 +1154,28 @@ export default function App() {
         {resolvedItems.length > 0 ? (
           <section className="flow-step" data-step="02" aria-label="选择版本">
             {resolvedItems.length > 1 ? (
-              <Text UNSAFE_className="section-kicker">
-                共 {resolvedItems.length} 个视频 · 展开任意一个选择清晰度后下载
-              </Text>
+              <div className="batch-bar">
+                <Text UNSAFE_className="section-kicker">
+                  共 {resolvedItems.length} 个视频 · 选一次画质即可全部下载
+                </Text>
+                <div className="batch-bar-controls">
+                  <Picker
+                    aria-label="批量下载画质"
+                    selectedKey={batchQuality}
+                    onSelectionChange={(key) => setBatchQuality(key as BatchQuality)}
+                    items={BATCH_QUALITY_OPTIONS}
+                  >
+                    {(item) => <PickerItem>{item.label}</PickerItem>}
+                  </Picker>
+                  <Button
+                    variant="accent"
+                    isDisabled={batchTargetCount === 0}
+                    onPress={() => void handleDownloadAll()}
+                  >
+                    下载全部（{batchTargetCount}）
+                  </Button>
+                </div>
+              </div>
             ) : null}
             <ResolveBoard
               items={resolvedItems}
