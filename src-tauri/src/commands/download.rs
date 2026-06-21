@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -50,9 +51,40 @@ struct DownloadProgressPayload {
     eta: String,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize, Clone)]
+#[serde(default)]
 struct AppSettings {
     download_dir: Option<String>,
+    cookie_source: Option<String>,
+    cookie_file_path: Option<String>,
+    // sessionid is stored base64-encoded as a minimal visibility protection so it
+    // is not sitting in the config file as plain readable text.
+    instagram_sessionid_b64: Option<String>,
+    instagram_cookie_file_path: Option<String>,
+    instagram_collect_mode: Option<String>,
+    instagram_collect_count: Option<String>,
+}
+
+/// Settings exposed to the UI (sessionid decoded back to plain text).
+#[derive(Clone, Serialize)]
+pub struct AppSettingsPayload {
+    pub cookie_source: Option<String>,
+    pub cookie_file_path: Option<String>,
+    pub instagram_sessionid: Option<String>,
+    pub instagram_cookie_file_path: Option<String>,
+    pub instagram_collect_mode: Option<String>,
+    pub instagram_collect_count: Option<String>,
+}
+
+/// Full snapshot of UI-editable settings sent on every save.
+#[derive(Deserialize)]
+pub struct AppSettingsUpdate {
+    pub cookie_source: Option<String>,
+    pub cookie_file_path: Option<String>,
+    pub instagram_sessionid: Option<String>,
+    pub instagram_cookie_file_path: Option<String>,
+    pub instagram_collect_mode: Option<String>,
+    pub instagram_collect_count: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -221,7 +253,10 @@ fn run_download_task(
         "[run_download_task] task_id={task_id} url={url} format_id={:?} title={title}",
         format_id
     );
-    fs::create_dir_all(&download_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
+    // Land downloads under <base>/<site>/<resource>/ so different sites and
+    // different posts never share a flat folder.
+    let target_dir = resource_target_dir(&download_dir, &url);
+    fs::create_dir_all(&target_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
     if url.contains("x.com") {
         if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
@@ -236,7 +271,7 @@ fn run_download_task(
                 title,
                 url,
                 selection,
-                download_dir,
+                target_dir,
                 cancel_requested,
             );
         }
@@ -261,7 +296,7 @@ fn run_download_task(
     command.arg("--print");
     command.arg("after_move:__FINAL_PATH__:%(filepath)s");
     command.arg("-o");
-    command.arg(download_dir.join(format!("{}.%(ext)s", sanitize_filename(&title))));
+    command.arg(target_dir.join(format!("{}.%(ext)s", sanitize_filename(&title))));
 
     let direct_download_url = direct_download_url(format_id.as_deref());
 
@@ -743,12 +778,161 @@ fn effective_download_dir(default_dir: PathBuf, configured_dir: Option<&str>) ->
         .unwrap_or(default_dir)
 }
 
-fn app_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let config_dir = app
+/// Group finished downloads as `<base>/<site>/<resource>/<file>` so videos from
+/// different sites — and different posts/videos within one site — never mix in a
+/// single flat folder. Different qualities of the same resource share its folder.
+fn resource_target_dir(base: &Path, url: &str) -> PathBuf {
+    base.join(site_folder(url)).join(resource_folder(url))
+}
+
+/// Top-level folder per website, derived from the host (without a `www.` prefix).
+fn site_folder(url: &str) -> String {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let cleaned = sanitize_filename(host);
+    if cleaned.is_empty() || cleaned == "download" {
+        "other".into()
+    } else {
+        cleaned
+    }
+}
+
+/// A stable per-resource folder name. Prefers the site-specific content id
+/// (Instagram shortcode, X status id, Pornhub viewkey); otherwise falls back to
+/// the last path segment, then to a constant so a folder always exists.
+fn resource_folder(url: &str) -> String {
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        let segments: Vec<String> = parsed
+            .path_segments()
+            .map(|items| {
+                items
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let host = parsed.host_str().unwrap_or("");
+
+        if host.contains("instagram.com") {
+            if let Some(pos) = segments.iter().position(|segment| {
+                segment == "p" || segment == "reel" || segment == "reels" || segment == "tv"
+            }) {
+                if let Some(code) = segments.get(pos + 1) {
+                    return sanitize_filename(code);
+                }
+            }
+            if let Some(user) = segments.first() {
+                return sanitize_filename(user);
+            }
+        }
+
+        if host.contains("x.com") {
+            if let Some(pos) = segments.iter().position(|segment| segment == "status") {
+                if let Some(id) = segments.get(pos + 1) {
+                    return sanitize_filename(id);
+                }
+            }
+            if let Some(user) = segments.first() {
+                return sanitize_filename(user);
+            }
+        }
+
+        if host.contains("pornhub.com") {
+            if let Some((_, value)) = parsed.query_pairs().find(|(key, _)| key == "viewkey") {
+                return sanitize_filename(&value);
+            }
+        }
+
+        if let Some(last) = segments.last() {
+            let cleaned = sanitize_filename(last);
+            if cleaned != "download" {
+                return cleaned;
+            }
+        }
+    }
+
+    "resource".into()
+}
+
+/// Persistent config lives in a device-level folder under the user's home
+/// directory (`~/.swell-video-downloader`) instead of the app's data dir, so the
+/// config survives an app uninstall. `SWELL_CONFIG_DIR` overrides the location.
+fn config_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(dir) = std::env::var("SWELL_CONFIG_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    let home = app
         .path()
-        .app_config_dir()
-        .map_err(|err| format!("读取配置目录失败：{err}"))?;
-    Ok(config_dir.join("settings.json"))
+        .home_dir()
+        .map_err(|err| format!("读取用户主目录失败：{err}"))?;
+    Ok(home.join(".swell-video-downloader"))
+}
+
+fn app_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(config_base_dir(app)?.join("config.json"))
+}
+
+fn encode_secret(value: &str) -> String {
+    STANDARD.encode(value.as_bytes())
+}
+
+fn decode_secret(value: &str) -> Option<String> {
+    STANDARD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn settings_to_payload(settings: &AppSettings) -> AppSettingsPayload {
+    AppSettingsPayload {
+        cookie_source: settings.cookie_source.clone(),
+        cookie_file_path: settings.cookie_file_path.clone(),
+        instagram_sessionid: settings
+            .instagram_sessionid_b64
+            .as_deref()
+            .and_then(decode_secret),
+        instagram_cookie_file_path: settings.instagram_cookie_file_path.clone(),
+        instagram_collect_mode: settings.instagram_collect_mode.clone(),
+        instagram_collect_count: settings.instagram_collect_count.clone(),
+    }
+}
+
+#[tauri::command(async)]
+pub fn get_app_settings(app: AppHandle) -> Result<AppSettingsPayload, String> {
+    let settings = load_app_settings(&app)?;
+    Ok(settings_to_payload(&settings))
+}
+
+#[tauri::command(async)]
+pub fn set_app_settings(
+    app: AppHandle,
+    settings: AppSettingsUpdate,
+) -> Result<AppSettingsPayload, String> {
+    // Merge over the existing file so download_dir (managed separately) is kept.
+    let mut stored = load_app_settings(&app)?;
+    stored.cookie_source = normalize_optional(settings.cookie_source);
+    stored.cookie_file_path = normalize_optional(settings.cookie_file_path);
+    stored.instagram_cookie_file_path = normalize_optional(settings.instagram_cookie_file_path);
+    stored.instagram_collect_mode = normalize_optional(settings.instagram_collect_mode);
+    stored.instagram_collect_count = normalize_optional(settings.instagram_collect_count);
+    stored.instagram_sessionid_b64 =
+        normalize_optional(settings.instagram_sessionid).map(|value| encode_secret(&value));
+
+    save_app_settings(&app, &stored)?;
+    Ok(settings_to_payload(&stored))
 }
 
 fn load_app_settings(app: &AppHandle) -> Result<AppSettings, String> {
@@ -893,10 +1077,10 @@ fn sanitize_filename(value: &str) -> String {
 mod tests {
     use super::{
         apply_download_progress_args,
-        clean_format_descriptor, compose_download_title, direct_download_url,
-        effective_download_dir, extract_ssstwitter_selection, format_eta,
-        requires_binary_toolchain, sanitize_filename, staging_path_for,
-        with_ssstwitter_download_slot,
+        clean_format_descriptor, compose_download_title, decode_secret, direct_download_url,
+        effective_download_dir, encode_secret, extract_ssstwitter_selection, format_eta,
+        normalize_optional, requires_binary_toolchain, resource_folder, resource_target_dir,
+        sanitize_filename, site_folder, staging_path_for, with_ssstwitter_download_slot,
     };
     use std::{
         path::{Path, PathBuf},
@@ -988,6 +1172,76 @@ mod tests {
         let dir = effective_download_dir(default_dir.clone(), Some("   "));
 
         assert_eq!(dir, default_dir);
+    }
+
+    #[test]
+    fn sessionid_secret_round_trips_through_base64() {
+        let encoded = encode_secret("abc123:sessionid");
+        assert_ne!(encoded, "abc123:sessionid");
+        assert_eq!(decode_secret(&encoded).as_deref(), Some("abc123:sessionid"));
+    }
+
+    #[test]
+    fn normalize_optional_drops_blank_values() {
+        assert_eq!(normalize_optional(Some("  hi  ".into())).as_deref(), Some("hi"));
+        assert_eq!(normalize_optional(Some("   ".into())), None);
+        assert_eq!(normalize_optional(None), None);
+    }
+
+    #[test]
+    fn site_folder_uses_host_without_www_prefix() {
+        assert_eq!(
+            site_folder("https://www.instagram.com/p/Abc123/"),
+            "instagram.com"
+        );
+        assert_eq!(site_folder("https://x.com/user/status/42"), "x.com");
+        assert_eq!(site_folder("not a url"), "other");
+    }
+
+    #[test]
+    fn resource_folder_uses_site_specific_ids() {
+        assert_eq!(
+            resource_folder("https://www.instagram.com/p/C8w2abcDEF/"),
+            "C8w2abcDEF"
+        );
+        assert_eq!(
+            resource_folder("https://www.instagram.com/instagram/reel/DZu6dkVyImf/"),
+            "DZu6dkVyImf"
+        );
+        assert_eq!(
+            resource_folder("https://www.instagram.com/reels/DZxVqbsTzqZ/"),
+            "DZxVqbsTzqZ"
+        );
+        assert_eq!(
+            resource_folder("https://x.com/4Brazzerlive/status/2068239068916507115/video/1"),
+            "2068239068916507115"
+        );
+        assert_eq!(
+            resource_folder("https://www.pornhub.com/view_video.php?viewkey=ph5f00abc"),
+            "ph5f00abc"
+        );
+    }
+
+    #[test]
+    fn resource_folder_falls_back_to_profile_or_constant() {
+        assert_eq!(
+            resource_folder("https://www.instagram.com/instagram/"),
+            "instagram"
+        );
+        assert_eq!(resource_folder("https://example.com/"), "resource");
+    }
+
+    #[test]
+    fn resource_target_dir_nests_site_and_resource() {
+        let dir = resource_target_dir(
+            Path::new(r"C:\Downloads\video-downloader"),
+            "https://www.instagram.com/p/C8w2abcDEF/",
+        );
+
+        assert_eq!(
+            dir,
+            PathBuf::from(r"C:\Downloads\video-downloader\instagram.com\C8w2abcDEF")
+        );
     }
 
     #[test]

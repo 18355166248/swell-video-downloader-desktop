@@ -1,12 +1,12 @@
 import { Button, InlineAlert, Text } from '@react-spectrum/s2';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
 import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
 import { DiagnosticPanel } from './features/resolve/DiagnosticPanel';
 import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
-import { SettingsPanel } from './features/settings/SettingsPanel';
+import { SettingsDrawer } from './features/settings/SettingsDrawer';
 import {
   listenDownloadError,
   listenDownloadProgress,
@@ -15,23 +15,28 @@ import {
 import {
   cancelDownload,
   checkDependencies,
+  collectInstagramTargets,
   diagnoseMedia,
   generatePreview,
+  getAppSettings,
   getDownloadDirectorySettings,
   getTauriErrorMessage,
   listCookieSources,
   openDownloadLocation,
   resetDownloadDir,
   resolveMedia,
+  saveAppSettings,
   setDownloadDir,
   startDownload,
 } from './lib/tauri';
 import type {
+  AppSettings,
   CookieSource,
   DiagnoseMediaResponse,
   DiagnosticComparisonResult,
   DependencyStatus,
   DownloadDirectorySettings,
+  InstagramCollectMode,
   MediaFormat,
   ResolveMediaResponse,
 } from './lib/types';
@@ -201,6 +206,14 @@ function normalizeVideoUrl(raw: string): string | null {
   return parsed.toString();
 }
 
+function isInstagramUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.includes('instagram.com');
+  } catch {
+    return false;
+  }
+}
+
 function summarizeTitle(title: string, maxLength = 36): string {
   if (title.length <= maxLength) {
     return title;
@@ -279,6 +292,14 @@ export default function App() {
   const [cookieSources, setCookieSources] = useState<CookieSource[]>([]);
   const [selectedCookieSource, setSelectedCookieSource] = useState('chrome');
   const [cookieFilePath, setCookieFilePath] = useState('');
+  const [instagramSessionId, setInstagramSessionId] = useState('');
+  const [instagramCookieFilePath, setInstagramCookieFilePath] = useState('');
+  const [instagramCollectMode, setInstagramCollectMode] =
+    useState<InstagramCollectMode>('single');
+  const [instagramCollectCount, setInstagramCollectCount] = useState('1');
+  // Ephemeral cookies.txt exported by the Instagram collector for the active run.
+  // Kept separate from the user-entered cookieFilePath so it is never persisted.
+  const [instagramBridgeCookiePath, setInstagramBridgeCookiePath] = useState('');
   const [dependencyStatus, setDependencyStatus] = useState<DependencyStatus | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [diagnosticResult, setDiagnosticResult] = useState<DiagnoseMediaResponse | null>(null);
@@ -287,6 +308,7 @@ export default function App() {
     useState<DiagnoseMediaResponse | null>(null);
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
   // Task ids the user removed from the list — late progress/status events for
   // these are ignored so a deleted row never re-appears.
@@ -320,17 +342,79 @@ export default function App() {
     pushToast(message, 'error');
   }
 
+  // Persist the current settings snapshot (with the just-changed field applied)
+  // to the device-level config file so values survive restarts and reinstalls.
+  // Only user-edited fields flow through here — the ephemeral Instagram cookie
+  // bridge is never persisted.
+  function persistSettings(partial: Partial<AppSettings>) {
+    const snapshot: AppSettings = {
+      cookieSource: selectedCookieSource,
+      cookieFilePath,
+      instagramSessionId,
+      instagramCookieFilePath,
+      instagramCollectMode,
+      instagramCollectCount,
+      ...partial,
+    };
+    void saveAppSettings(snapshot).catch((err) => {
+      reportError(getTauriErrorMessage(err, '保存设置失败'));
+    });
+  }
+
+  function handleCookieSourceChange(value: string) {
+    setSelectedCookieSource(value);
+    persistSettings({ cookieSource: value });
+  }
+
+  function handleCookieFilePathChange(value: string) {
+    setCookieFilePath(value);
+    persistSettings({ cookieFilePath: value });
+  }
+
+  function handleInstagramSessionIdChange(value: string) {
+    setInstagramSessionId(value);
+    persistSettings({ instagramSessionId: value });
+  }
+
+  function handleInstagramCookieFilePathChange(value: string) {
+    setInstagramCookieFilePath(value);
+    persistSettings({ instagramCookieFilePath: value });
+  }
+
+  function handleInstagramCollectModeChange(value: AppSettings['instagramCollectMode']) {
+    setInstagramCollectMode(value);
+    persistSettings({ instagramCollectMode: value });
+  }
+
+  function handleInstagramCollectCountChange(value: string) {
+    setInstagramCollectCount(value);
+    persistSettings({ instagramCollectCount: value });
+  }
+
   useEffect(() => {
     async function loadSettingsData() {
-      const [sources, dependencies, dirSettings] = await Promise.all([
+      const [sources, dependencies, dirSettings, appSettings] = await Promise.all([
         listCookieSources(),
         checkDependencies(),
         getDownloadDirectorySettings(),
+        getAppSettings(),
       ]);
       setCookieSources(sources);
-      if (sources.length > 0) {
+      // Restore the saved cookie source if it still exists; otherwise default to
+      // the first available source.
+      const savedSource = appSettings.cookieSource;
+      const validSavedSource =
+        savedSource && sources.some((item) => item.id === savedSource) ? savedSource : '';
+      if (validSavedSource) {
+        setSelectedCookieSource(validSavedSource);
+      } else if (sources.length > 0) {
         setSelectedCookieSource(sources[0].id);
       }
+      setCookieFilePath(appSettings.cookieFilePath);
+      setInstagramSessionId(appSettings.instagramSessionId);
+      setInstagramCookieFilePath(appSettings.instagramCookieFilePath);
+      setInstagramCollectMode(appSettings.instagramCollectMode);
+      setInstagramCollectCount(appSettings.instagramCollectCount);
       setDependencyStatus(dependencies);
       setDownloadDirectorySettings(dirSettings);
       setDownloadDirState(dirSettings.currentDir);
@@ -595,14 +679,67 @@ export default function App() {
       return;
     }
 
-    void handleResolveAll(Array.from(new Set(valid)));
+    const unique = Array.from(new Set(valid));
+
+    // Instagram entries (a single post/reel, or a profile link) go through the
+    // Playwright collector first; the canonical URLs it returns then flow into
+    // the existing resolve queue.
+    if (unique.length === 1 && isInstagramUrl(unique[0])) {
+      void handleResolveInstagram(unique[0]);
+      return;
+    }
+
+    void handleResolveAll(unique);
+  }
+
+  async function handleResolveInstagram(entryUrl: string) {
+    const count = Math.max(1, Number.parseInt(instagramCollectCount || '1', 10) || 1);
+    setIsResolving(true);
+    setError('');
+    try {
+      const collected = await collectInstagramTargets(
+        entryUrl,
+        instagramCollectMode,
+        count,
+        instagramSessionId || null,
+        instagramCookieFilePath || null,
+      );
+
+      collected.warnings.forEach((warning) => pushToast(warning, 'info'));
+
+      const urls = Array.from(new Set(collected.items.map((item) => item.url)));
+      if (urls.length === 0) {
+        reportError('Instagram 采集未返回任何内容，请检查登录态或链接后重试。');
+        setIsResolving(false);
+        return;
+      }
+
+      // Reuse the collector's exported cookies for resolve + download via a
+      // dedicated state, so the persisted cookieFilePath is left untouched.
+      const bridgePath = collected.cookieBridgeFilePath || '';
+      setInstagramBridgeCookiePath(bridgePath);
+
+      pushToast(`已采集 ${urls.length} 条 Instagram 内容。`, 'success');
+      await handleResolveAll(urls, bridgePath || undefined);
+    } catch (err) {
+      reportError(getTauriErrorMessage(err, 'Instagram 采集失败'));
+      setIsResolving(false);
+    }
   }
 
   // Resolve one or many links, then let the user pick a quality per video.
   // Cards stream in as each link resolves so a slow link can't block the rest.
-  async function handleResolveAll(targetUrls: string[]) {
+  async function handleResolveAll(targetUrls: string[], cookieFilePathOverride?: string) {
     const session = (resolveSessionRef.current += 1);
     const isActive = () => resolveSessionRef.current === session;
+    // A non-Instagram run clears any stale collector bridge so its cookies don't
+    // leak into x.com / pornhub downloads.
+    if (cookieFilePathOverride === undefined) {
+      setInstagramBridgeCookiePath('');
+    }
+    // The Instagram collector exports a fresh cookies.txt; use it for this run
+    // directly instead of waiting for state to settle.
+    const effectiveCookieFilePath = cookieFilePathOverride ?? cookieFilePath;
 
     setIsResolving(true);
     setError('');
@@ -632,7 +769,7 @@ export default function App() {
         return;
       }
       try {
-        const result = await resolveMedia(targetUrl, selectedCookieSource, cookieFilePath);
+        const result = await resolveMedia(targetUrl, selectedCookieSource, effectiveCookieFilePath);
         if (!isActive()) {
           return;
         }
@@ -706,7 +843,7 @@ export default function App() {
         format.id ?? null,
         taskTitle,
         selectedCookieSource,
-        cookieFilePath,
+        instagramBridgeCookiePath || cookieFilePath,
       );
       setDownloadState((current) => ({
         ...current,
@@ -862,8 +999,25 @@ export default function App() {
             {HERO_STEPS.map((step) => {
               const state =
                 step.id < activeStep ? 'is-done' : step.id === activeStep ? 'is-active' : '';
+              const isSettingsStep = step.id === 4;
               return (
-                <li key={step.id} className={`flow-progress-step ${state}`.trim()}>
+                <li
+                  key={step.id}
+                  className={`flow-progress-step ${state}${isSettingsStep ? ' is-clickable' : ''}`.trim()}
+                  {...(isSettingsStep
+                    ? {
+                        role: 'button' as const,
+                        tabIndex: 0,
+                        onClick: () => setIsSettingsOpen(true),
+                        onKeyDown: (event: ReactKeyboardEvent) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setIsSettingsOpen(true);
+                          }
+                        },
+                      }
+                    : {})}
+                >
                   <span className="num">{step.id}</span>
                   <span className="lbl">{step.label}</span>
                 </li>
@@ -961,25 +1115,49 @@ export default function App() {
           )}
         </section>
 
-        <section className="flow-step" data-step="04" aria-label="设置">
-          <SettingsPanel
-            cookieSources={cookieSources}
-            selectedCookieSource={selectedCookieSource}
-            cookieFilePath={cookieFilePath}
-            dependencyStatus={dependencyStatus}
-            downloadDirectory={downloadDirectorySettings}
-            downloadDirectoryDraft={downloadDirectoryDraft}
-            isSavingDownloadDirectory={isSavingDownloadDirectory}
-            onCookieSourceChange={setSelectedCookieSource}
-            onCookieFilePathChange={setCookieFilePath}
-            onDownloadDirectoryDraftChange={setDownloadDirectoryDraft}
-            onSaveDownloadDirectory={handleSaveDownloadDirectory}
-            onResetDownloadDirectory={handleResetDownloadDirectory}
-          />
-        </section>
           </div>
         </main>
       </div>
+
+      <button
+        type="button"
+        className="settings-fab"
+        aria-label="打开设置"
+        onClick={() => setIsSettingsOpen(true)}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8m0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4m-1.4-7l-.4 2.2q-.7.25-1.3.65L6.8 7.2 4.8 8.8l1.1 1.9q-.15.65-.15 1.3t.15 1.3L4.8 15.2l2 1.6 2.1-.85q.6.4 1.3.65l.4 2.2h2.8l.4-2.2q.7-.25 1.3-.65l2.1.85 2-1.6-1.1-1.9q.15-.65.15-1.3t-.15-1.3l1.1-1.9-2-1.6-2.1.85q-.6-.4-1.3-.65L13.4 3z"
+          />
+        </svg>
+        <span>设置</span>
+      </button>
+
+      <SettingsDrawer
+        open={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        cookieSources={cookieSources}
+        selectedCookieSource={selectedCookieSource}
+        cookieFilePath={cookieFilePath}
+        instagramSessionId={instagramSessionId}
+        instagramCookieFilePath={instagramCookieFilePath}
+        instagramCollectMode={instagramCollectMode}
+        instagramCollectCount={instagramCollectCount}
+        dependencyStatus={dependencyStatus}
+        downloadDirectory={downloadDirectorySettings}
+        downloadDirectoryDraft={downloadDirectoryDraft}
+        isSavingDownloadDirectory={isSavingDownloadDirectory}
+        onCookieSourceChange={handleCookieSourceChange}
+        onCookieFilePathChange={handleCookieFilePathChange}
+        onInstagramSessionIdChange={handleInstagramSessionIdChange}
+        onInstagramCookieFilePathChange={handleInstagramCookieFilePathChange}
+        onInstagramCollectModeChange={handleInstagramCollectModeChange}
+        onInstagramCollectCountChange={handleInstagramCollectCountChange}
+        onDownloadDirectoryDraftChange={setDownloadDirectoryDraft}
+        onSaveDownloadDirectory={handleSaveDownloadDirectory}
+        onResetDownloadDirectory={handleResetDownloadDirectory}
+      />
     </>
   );
 }

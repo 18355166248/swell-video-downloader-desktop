@@ -244,15 +244,19 @@ fn diagnose_media_blocking(
 }
 
 fn resolve_source(url: &str) -> Result<String, String> {
-    if !(url.contains("x.com") || url.contains("pornhub.com")) {
-        return Err("仅支持 x.com 和 pornhub.com".into());
+    if url.contains("instagram.com") {
+        return Ok("instagram.com".to_string());
     }
 
-    Ok(if url.contains("x.com") {
-        "x.com".to_string()
-    } else {
-        "pornhub.com".to_string()
-    })
+    if url.contains("x.com") {
+        return Ok("x.com".to_string());
+    }
+
+    if url.contains("pornhub.com") {
+        return Ok("pornhub.com".to_string());
+    }
+
+    Err("仅支持 x.com、pornhub.com 和 instagram.com".into())
 }
 
 fn build_resolve_response(
@@ -501,6 +505,13 @@ mod tests {
         let error = resolve_source("https://example.com/video/123").expect_err("host should reject");
 
         assert!(error.contains("仅支持"));
+    }
+
+    #[test]
+    fn accepts_instagram_host() {
+        let source = resolve_source("https://www.instagram.com/p/demo123/")
+            .expect("instagram host should be supported");
+        assert_eq!(source, "instagram.com");
     }
 
     #[test]

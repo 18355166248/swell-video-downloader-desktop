@@ -1,11 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type {
+  AppSettings,
+  CollectInstagramTargetsResponse,
   CookieSource,
   DiagnoseMediaResponse,
   DiagnosticErrorCategory,
   DependencyStatus,
   DownloadDirectorySettings,
+  InstagramCollectItem,
+  InstagramCollectMode,
   ResolveMediaResponse,
 } from './types';
 
@@ -20,7 +24,7 @@ type MediaFormatWire = {
 
 type ResolveMediaWireResponse = {
   title: string;
-  source: 'x.com' | 'pornhub.com';
+  source: 'x.com' | 'pornhub.com' | 'instagram.com';
   duration_text: string;
   recommendation: MediaFormatWire;
   formats: MediaFormatWire[];
@@ -157,6 +161,52 @@ export async function diagnoseMedia(
   };
 }
 
+type InstagramCollectItemWire = {
+  url: string;
+  kind: string;
+  source_label: string;
+  thumbnail_hint?: string | null;
+};
+
+type CollectInstagramTargetsWireResponse = {
+  items: InstagramCollectItemWire[];
+  resolved_count: number;
+  warnings: string[];
+  cookie_bridge_file_path?: string | null;
+};
+
+export async function collectInstagramTargets(
+  url: string,
+  mode: InstagramCollectMode,
+  count: number,
+  sessionid?: string | null,
+  cookieFilePath?: string | null,
+): Promise<CollectInstagramTargetsResponse> {
+  // Nested struct fields are deserialized by serde with their snake_case names,
+  // so the request object must use snake_case keys (unlike top-level args).
+  const response = await invoke<CollectInstagramTargetsWireResponse>('collect_instagram_targets', {
+    request: {
+      url,
+      mode,
+      count,
+      sessionid: sessionid ?? null,
+      cookie_file_path: cookieFilePath ?? null,
+    },
+  });
+
+  return {
+    items: response.items.map<InstagramCollectItem>((item) => ({
+      url: item.url,
+      kind: item.kind as InstagramCollectItem['kind'],
+      sourceLabel: item.source_label,
+      thumbnailHint: item.thumbnail_hint ?? null,
+    })),
+    resolvedCount: response.resolved_count,
+    warnings: response.warnings,
+    cookieBridgeFilePath: response.cookie_bridge_file_path ?? null,
+  };
+}
+
 export async function generatePreview(url: string, formatId: string): Promise<string> {
   return invoke<string>('generate_preview', { url, formatId });
 }
@@ -186,6 +236,46 @@ export async function setDownloadDir(path: string): Promise<string> {
 
 export async function resetDownloadDir(): Promise<string> {
   return invoke<string>('reset_download_dir');
+}
+
+type AppSettingsWire = {
+  cookie_source?: string | null;
+  cookie_file_path?: string | null;
+  instagram_sessionid?: string | null;
+  instagram_cookie_file_path?: string | null;
+  instagram_collect_mode?: string | null;
+  instagram_collect_count?: string | null;
+};
+
+function mapAppSettings(wire: AppSettingsWire): AppSettings {
+  return {
+    cookieSource: wire.cookie_source ?? '',
+    cookieFilePath: wire.cookie_file_path ?? '',
+    instagramSessionId: wire.instagram_sessionid ?? '',
+    instagramCookieFilePath: wire.instagram_cookie_file_path ?? '',
+    instagramCollectMode: (wire.instagram_collect_mode as InstagramCollectMode) || 'single',
+    instagramCollectCount: wire.instagram_collect_count ?? '1',
+  };
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  const wire = await invoke<AppSettingsWire>('get_app_settings');
+  return mapAppSettings(wire);
+}
+
+export async function saveAppSettings(settings: AppSettings): Promise<AppSettings> {
+  // Nested struct fields use serde snake_case names.
+  const wire = await invoke<AppSettingsWire>('set_app_settings', {
+    settings: {
+      cookie_source: settings.cookieSource || null,
+      cookie_file_path: settings.cookieFilePath || null,
+      instagram_sessionid: settings.instagramSessionId || null,
+      instagram_cookie_file_path: settings.instagramCookieFilePath || null,
+      instagram_collect_mode: settings.instagramCollectMode || null,
+      instagram_collect_count: settings.instagramCollectCount || null,
+    },
+  });
+  return mapAppSettings(wire);
 }
 
 /** Open the download folder, selecting the finished file when its path is known. */

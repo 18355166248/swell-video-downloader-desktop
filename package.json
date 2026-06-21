@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "setup:ffmpeg": "node scripts/setup-ffmpeg.mjs",
-    "postinstall": "node scripts/setup-ffmpeg.mjs"
+    "postinstall": "node scripts/setup-ffmpeg.mjs",
+    "instagram:collector": "node scripts/instagram-collector.mjs"
   },
   "dependencies": {
     "@react-spectrum/s2": "^1.5.0",
@@ -25,6 +26,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "ffmpeg-static": "^5.2.0",
+    "playwright": "^1.61.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }

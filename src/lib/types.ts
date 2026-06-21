@@ -9,11 +9,33 @@ export type MediaFormat = {
 
 export type ResolveMediaResponse = {
   title: string;
-  source: 'x.com' | 'pornhub.com';
+  source: 'x.com' | 'pornhub.com' | 'instagram.com';
   durationText: string;
   recommendation: MediaFormat;
   formats: MediaFormat[];
   thumbnail?: string | null;
+};
+
+export type InstagramAuthMode = 'sessionid' | 'cookies_txt';
+
+export type InstagramCollectMode =
+  | 'single'
+  | 'detail_next'
+  | 'profile_recent'
+  | 'story_experimental';
+
+export type InstagramCollectItem = {
+  url: string;
+  kind: 'post' | 'reel' | 'story' | 'unknown';
+  sourceLabel: string;
+  thumbnailHint?: string | null;
+};
+
+export type CollectInstagramTargetsResponse = {
+  items: InstagramCollectItem[];
+  resolvedCount: number;
+  warnings: string[];
+  cookieBridgeFilePath?: string | null;
 };
 
 export type DiagnosticErrorCategory =
@@ -83,4 +105,13 @@ export type DownloadDirectorySettings = {
   currentDir: string;
   defaultDir: string;
   isCustom: boolean;
+};
+
+export type AppSettings = {
+  cookieSource: string;
+  cookieFilePath: string;
+  instagramSessionId: string;
+  instagramCookieFilePath: string;
+  instagramCollectMode: InstagramCollectMode;
+  instagramCollectCount: string;
 };

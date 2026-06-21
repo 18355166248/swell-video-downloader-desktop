@@ -1,17 +1,38 @@
-import { Button, Heading, StatusLight, Text, TextField } from '@react-spectrum/s2';
+import { Button, Heading, Picker, PickerItem, StatusLight, Text, TextField } from '@react-spectrum/s2';
 import { CookieSourcePanel } from '../cookies/CookieSourcePanel';
-import type { CookieSource, DependencyStatus, DownloadDirectorySettings } from '../../lib/types';
+import { SessionIdHelpDrawer } from './SessionIdHelpDrawer';
+import type {
+  CookieSource,
+  DependencyStatus,
+  DownloadDirectorySettings,
+  InstagramCollectMode,
+} from '../../lib/types';
 
-type SettingsPanelProps = {
+const INSTAGRAM_MODE_OPTIONS: { id: InstagramCollectMode; label: string }[] = [
+  { id: 'single', label: '当前链接（单条）' },
+  { id: 'detail_next', label: '详情页连续下一条' },
+  { id: 'profile_recent', label: '用户主页最近内容' },
+  { id: 'story_experimental', label: 'Story（实验性）' },
+];
+
+export type SettingsPanelProps = {
   cookieSources: CookieSource[];
   selectedCookieSource: string;
   cookieFilePath: string;
+  instagramSessionId: string;
+  instagramCookieFilePath: string;
+  instagramCollectMode: InstagramCollectMode;
+  instagramCollectCount: string;
   dependencyStatus: DependencyStatus | null;
   downloadDirectory: DownloadDirectorySettings | null;
   downloadDirectoryDraft: string;
   isSavingDownloadDirectory: boolean;
   onCookieSourceChange: (key: string) => void;
   onCookieFilePathChange: (value: string) => void;
+  onInstagramSessionIdChange: (value: string) => void;
+  onInstagramCookieFilePathChange: (value: string) => void;
+  onInstagramCollectModeChange: (value: InstagramCollectMode) => void;
+  onInstagramCollectCountChange: (value: string) => void;
   onDownloadDirectoryDraftChange: (value: string) => void;
   onSaveDownloadDirectory: () => void;
   onResetDownloadDirectory: () => void;
@@ -19,10 +40,7 @@ type SettingsPanelProps = {
 
 export function SettingsPanel(props: SettingsPanelProps) {
   return (
-    <div className="paper-card settings-card">
-      <Heading level={3} UNSAFE_className="card-title">设置</Heading>
-      <div className="card-body">
-          <div className="panel-stack">
+          <div className="panel-stack settings-panel-stack">
             <CookieSourcePanel
               items={props.cookieSources}
               selectedKey={props.selectedCookieSource}
@@ -30,6 +48,47 @@ export function SettingsPanel(props: SettingsPanelProps) {
               onSelectionChange={props.onCookieSourceChange}
               onCookieFilePathChange={props.onCookieFilePathChange}
             />
+            <div className="instagram-settings panel-stack">
+              <div className="instagram-settings-head">
+                <Heading level={4} UNSAFE_className="settings-subtitle">Instagram 访问</Heading>
+                <SessionIdHelpDrawer />
+              </div>
+              <Text UNSAFE_className="settings-hint">
+                主推荐粘贴 sessionid；cookies.txt 作为备用登录方案。
+              </Text>
+              <TextField
+                label="Instagram sessionid"
+                type="password"
+                value={props.instagramSessionId}
+                onChange={props.onInstagramSessionIdChange}
+                placeholder="粘贴 sessionid，主推荐方案"
+                UNSAFE_style={{ width: '100%' }}
+              />
+              <TextField
+                label="Instagram cookies.txt 路径（备用）"
+                value={props.instagramCookieFilePath}
+                onChange={props.onInstagramCookieFilePathChange}
+                placeholder="例如 C:\\Users\\Administrator\\Downloads\\instagram-cookies.txt"
+                UNSAFE_style={{ width: '100%' }}
+              />
+              <Picker
+                label="采集模式"
+                selectedKey={props.instagramCollectMode}
+                onSelectionChange={(key) =>
+                  props.onInstagramCollectModeChange(key as InstagramCollectMode)
+                }
+                items={INSTAGRAM_MODE_OPTIONS}
+              >
+                {(item) => <PickerItem>{item.label}</PickerItem>}
+              </Picker>
+              <TextField
+                label="抓取数量"
+                value={props.instagramCollectCount}
+                onChange={props.onInstagramCollectCountChange}
+                inputMode="numeric"
+                placeholder="例如 1、3、5"
+              />
+            </div>
             <div className="download-dir-settings">
               <TextField
                 label="下载目录"
@@ -38,8 +97,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 placeholder={props.downloadDirectory?.defaultDir ?? '输入下载目录'}
                 description={
                   props.downloadDirectory?.isCustom
-                    ? `当前使用自定义目录，默认目录是 ${props.downloadDirectory.defaultDir}`
-                    : '当前使用默认目录；失败下载会保留在该目录下的 incomplete 文件夹里。'
+                    ? `当前使用自定义目录，默认目录是 ${props.downloadDirectory.defaultDir}。下载会按「网站/资源」分文件夹存放。`
+                    : '当前使用默认目录；下载会按「网站/资源」分文件夹存放，失败下载保留在 incomplete 文件夹里。'
                 }
                 UNSAFE_style={{ width: '100%' }}
               />
@@ -71,7 +130,5 @@ export function SettingsPanel(props: SettingsPanelProps) {
             <Text>默认优先使用项目内置二进制，其次回退到系统 PATH。</Text>
             <Text>手动导入时请提供 Netscape 格式的 cookies.txt，并确保该 Cookie 能在浏览器里正常查看目标 X 内容。</Text>
           </div>
-      </div>
-    </div>
   );
 }

@@ -10,12 +10,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::resolve::resolve_media,
             commands::resolve::diagnose_media,
+            commands::instagram::collect_instagram_targets,
             commands::download::start_download,
             commands::download::cancel_download,
             commands::download::get_download_dir,
             commands::download::get_download_dir_settings,
             commands::download::set_download_dir,
             commands::download::reset_download_dir,
+            commands::download::get_app_settings,
+            commands::download::set_app_settings,
             commands::preview::generate_preview,
             commands::cookies::list_cookie_sources,
             commands::system::check_dependencies

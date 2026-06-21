@@ -326,12 +326,17 @@ pub fn classify_yt_dlp_error(raw: &str) -> YtDlpErrorInfo {
         || lower.contains("members only")
         || lower.contains("private video")
         || lower.contains("age verification")
+        || lower.contains("empty media response")
+        || lower.contains("logged-in")
+        || lower.contains("use --cookies")
+        || lower.contains("--cookies-from-browser")
+        || lower.contains("login required")
         || trimmed.contains("年龄")
         || trimmed.contains("登录")
     {
         return YtDlpErrorInfo {
             error_category: "login_or_access_required".into(),
-            normalized_message: "当前内容可能需要登录态、访问权限或年龄校验后才能解析。".into(),
+            normalized_message: "当前内容需要登录态才能解析。Instagram 请在设置「Instagram 访问」里粘贴 sessionid（或提供 cookies.txt）；其他站点可改用浏览器 Cookie 或导入 cookies.txt 后重试。".into(),
         };
     }
 
@@ -440,20 +445,26 @@ fn cookie_args(
     cookie_source: Option<&str>,
     cookie_file_path: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    // An explicit cookies.txt path takes priority over the browser cookie source.
+    // The Instagram collector exports a bridge cookies.txt and sets this path even
+    // when the selected source is still "chrome", so honoring it here lets the
+    // collector and yt-dlp share one auth state.
+    if let Some(path) = cookie_file_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !Path::new(path).is_file() {
+            return Err("cookies.txt 文件不存在，请确认路径后重试。".into());
+        }
+
+        return Ok(vec!["--cookies".into(), path.to_string()]);
+    }
+
     match current_cookie_mode(cookie_source).as_str() {
         "chrome" => Ok(vec!["--cookies-from-browser".into(), "chrome".into()]),
         "edge" => Ok(vec!["--cookies-from-browser".into(), "edge".into()]),
         "import" => {
-            let path = cookie_file_path
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "已选择手动导入 Cookie，请填写 cookies.txt 文件路径。".to_string())?;
-
-            if !Path::new(path).is_file() {
-                return Err("cookies.txt 文件不存在，请确认路径后重试。".into());
-            }
-
-            Ok(vec!["--cookies".into(), path.to_string()])
+            Err("已选择手动导入 Cookie，请填写 cookies.txt 文件路径。".into())
         }
         "none" => Ok(Vec::new()),
         other => Err(format!("不支持的 Cookie 来源：{other}")),
@@ -591,6 +602,16 @@ mod tests {
         );
         assert!(preview.display_command.contains("--cookies-from-browser chrome"));
         assert!(preview.display_command.contains("--proxy http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn classify_instagram_empty_media_response_as_login_required() {
+        let info = classify_yt_dlp_error(
+            "ERROR: [Instagram] DZxVqbsTzqZ: Instagram sent an empty media response. Check if this post is accessible in your browser without being logged-in. If it is not, then use --cookies-from-browser or --cookies for the authentication.",
+        );
+
+        assert_eq!(info.error_category, "login_or_access_required");
+        assert!(info.normalized_message.contains("sessionid"));
     }
 
     #[test]

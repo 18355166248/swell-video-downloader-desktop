@@ -11,10 +11,27 @@
 - 基于 `yt-dlp + ffmpeg`
 - 以 Windows 为主，兼顾 macOS
 
+## Instagram
+
+- 单条帖子 / Reel：直接粘贴链接即可（采集模式选「当前链接」，数量 1）
+- 连续抓取：选择「详情页连续下一条」或「用户主页最近内容」，并设置抓取数量 `N`
+- 登录态优先粘贴 `sessionid`；`cookies.txt` 作为备用方案
+- Story 为实验性能力，失败时会单独提示
+- 采集依赖 Playwright（首次需执行 `node node_modules/playwright/cli.js install chromium` 下载浏览器）
+- 访问 Instagram 通常需要本地代理，采集脚本会读取 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量
+
+## 配置持久化
+
+- 基础配置(下载目录、Cookie 来源/路径、Instagram sessionid 与采集设置)保存在用户主目录下的 `~/.swell-video-downloader/config.json`,**卸载应用不会清除**。
+- 可用环境变量 `SWELL_CONFIG_DIR` 覆盖该目录位置。
+- `sessionid` 以 base64 编码存储(最小可见性保护),不在配置文件里以明文出现;采集过程导出的临时 Cookie 桥接文件不会被持久化。
+
 ## 文档入口
 
 - 设计说明：`docs/superpowers/specs/2026-06-20-swell-desktop-downloader-design.md`
 - 实施计划：`docs/superpowers/plans/2026-06-20-swell-desktop-downloader-v1.md`
+- Instagram 设计说明：`docs/superpowers/specs/2026-06-21-instagram-support-design.md`
+- Instagram 实施计划：`docs/superpowers/plans/2026-06-21-instagram-support.md`
 
 ## 二进制依赖
 
