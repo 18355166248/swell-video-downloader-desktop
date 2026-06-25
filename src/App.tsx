@@ -3,8 +3,17 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
 import {
+  archiveFinishedRows,
   createDownloadKey,
+  deleteHistoryRow,
   hasActiveDownloadForFormat,
+  isActiveStatus,
+  mergeRowsById,
+  pruneDownloadHistory,
+  removeCurrentRow,
+  replaceCurrentDownloadRow,
+  updateDownloadProgress,
+  updateDownloadStatus,
   upsertCurrentDownloadRow,
   type DownloadBucketState,
 } from './features/downloads/download-state';
@@ -78,83 +87,14 @@ function loadStoredHistory(): DownloadRow[] {
     }
 
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as DownloadRow[]) : [];
+    return Array.isArray(parsed) ? pruneDownloadHistory(parsed as DownloadRow[]) : [];
   } catch {
     return [];
   }
 }
 
-function mergeRowsById(primary: DownloadRow[], secondary: DownloadRow[]): DownloadRow[] {
-  const seen = new Set<string>();
-  const merged: DownloadRow[] = [];
-
-  for (const row of [...primary, ...secondary]) {
-    if (seen.has(row.id)) {
-      continue;
-    }
-    seen.add(row.id);
-    merged.push(row);
-  }
-
-  return merged;
-}
-
-const ACTIVE_STATUSES = ['queued', 'downloading', 'postprocessing', 'canceling'];
-
-function isActiveStatus(status: string): boolean {
-  return ACTIVE_STATUSES.includes(status);
-}
-
-// Move only finished (completed/failed/canceled) rows into history; downloads
-// still in flight stay in the current queue so a new resolve never kills them.
-function archiveFinishedRows(state: DownloadBucketState): DownloadBucketState {
-  const finished = state.current.filter((row) => !isActiveStatus(row.status));
-  if (finished.length === 0) {
-    return state;
-  }
-
-  return {
-    current: state.current.filter((row) => isActiveStatus(row.status)),
-    history: mergeRowsById(finished, state.history),
-  };
-}
-
-function updateRowCollections(
-  state: DownloadBucketState,
-  taskId: string,
-  updater: (row: DownloadRow) => DownloadRow,
-  fallbackRow: DownloadRow,
-): DownloadBucketState {
-  const updateList = (rows: DownloadRow[]) =>
-    rows.map((row) => (row.id === taskId ? updater(row) : row));
-
-  const inCurrent = state.current.some((row) => row.id === taskId);
-  const inHistory = state.history.some((row) => row.id === taskId);
-
-  // Update BOTH lists when the id appears in each — prevents stale history
-  // entries (e.g. a fallback "queued" row) from surviving after the same
-  // task has progressed to "completed" in current.
-  if (inCurrent || inHistory) {
-    return {
-      current: inCurrent ? updateList(state.current) : state.current,
-      history: inHistory ? updateList(state.history) : state.history,
-    };
-  }
-
-  return {
-    ...state,
-    history: [fallbackRow, ...state.history],
-  };
-}
-
-function createFallbackRow(taskId: string, title: string, status: string): DownloadRow {
-  return {
-    id: taskId,
-    title,
-    sessionLabel: '历史任务',
-    status,
-    progress: status === 'completed' ? '100%' : '0%',
-  };
+function optimisticDownloadTaskId(downloadKey: string): string {
+  return `pending:${downloadKey}`;
 }
 
 function deriveSessionLabel(url: string, result?: ResolveMediaResponse | null): string {
@@ -529,7 +469,7 @@ export default function App() {
     }
     window.localStorage.setItem(
       DOWNLOAD_HISTORY_STORAGE_KEY,
-      JSON.stringify(downloadState.history),
+      JSON.stringify(pruneDownloadHistory(downloadState.history)),
     );
   }, [downloadState.history]);
 
@@ -542,20 +482,11 @@ export default function App() {
           return;
         }
         setDownloadState((current) =>
-          updateRowCollections(
-            current,
-            payload.task_id,
-            (row) => ({
-              ...row,
-              progress: payload.percent,
-              speed: payload.speed,
-            }),
-            {
-              ...createFallbackRow(payload.task_id, '历史任务', 'downloading'),
-              progress: payload.percent,
-              speed: payload.speed,
-            },
-          ),
+          updateDownloadProgress(current, {
+            taskId: payload.task_id,
+            percent: payload.percent,
+            speed: payload.speed,
+          }),
         );
       }),
       listenDownloadStatus((payload) => {
@@ -588,38 +519,14 @@ export default function App() {
           releaseActiveDownloadKey(payload.task_id);
         }
 
-        setDownloadState((current) => {
-          const updated = updateRowCollections(
-            current,
-            payload.task_id,
-            (row) => ({
-              ...row,
-              title: payload.title,
-              status: payload.status,
-              progress:
-                payload.status === 'completed'
-                  ? '100%'
-                  : payload.status === 'failed'
-                    ? row.progress || '0%'
-                    : row.progress,
-              outputPath: payload.output_path ?? row.outputPath,
-            }),
-            {
-              ...createFallbackRow(payload.task_id, payload.title, payload.status),
-              outputPath: payload.output_path ?? null,
-            },
-          );
-          // Auto-archive: sweep finished downloads into history so the
-          // "current" tab only shows active/in-flight tasks.
-          if (
-            payload.status === 'completed' ||
-            payload.status === 'failed' ||
-            payload.status === 'canceled'
-          ) {
-            return archiveFinishedRows(updated);
-          }
-          return updated;
-        });
+        setDownloadState((current) =>
+          updateDownloadStatus(current, {
+            taskId: payload.task_id,
+            title: payload.title,
+            status: payload.status,
+            outputPath: payload.output_path ?? null,
+          }),
+        );
       }),
       listenDownloadError((payload) => {
         if (payload.task_id && dismissedDownloadIds.current.has(payload.task_id)) {
@@ -1064,8 +971,23 @@ export default function App() {
     }
     activeDownloadKeys.current.add(downloadKey);
     setDownloadingIds((current) => new Set(current).add(downloadKey));
+    const taskTitle = buildDownloadTitle(targetResolved.title, format);
+    const optimisticTaskId = optimisticDownloadTaskId(downloadKey);
+    setDownloadState((current) =>
+      upsertCurrentDownloadRow(current, {
+        id: optimisticTaskId,
+        title: taskTitle,
+        sessionLabel,
+        status: 'starting',
+        progress: '0%',
+        sourceUrl: targetUrl,
+        formatId: format.id ?? null,
+      }),
+    );
+    if (notifyStart) {
+      pushToast(`正在加入下载队列：${summarizeTitle(taskTitle)}`, 'info', 4000);
+    }
     try {
-      const taskTitle = buildDownloadTitle(targetResolved.title, format);
       const taskId = await startDownload(
         targetUrl,
         format.id ?? null,
@@ -1075,7 +997,7 @@ export default function App() {
       );
       registerActiveDownloadKey(taskId, downloadKey);
       setDownloadState((current) =>
-        upsertCurrentDownloadRow(current, {
+        replaceCurrentDownloadRow(current, optimisticTaskId, {
           id: taskId,
           title: taskTitle,
           sessionLabel,
@@ -1086,11 +1008,12 @@ export default function App() {
         }),
       );
       if (notifyStart) {
-        pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
+        pushToast(`已加入下载队列：${summarizeTitle(taskTitle)}`, 'success');
       }
       return { ok: true };
     } catch (err) {
       activeDownloadKeys.current.delete(downloadKey);
+      setDownloadState((current) => removeCurrentRow(current, optimisticTaskId));
       const message = getTauriErrorMessage(err, '创建下载任务失败');
       reportError(message);
       return { ok: false, message };
@@ -1172,10 +1095,7 @@ export default function App() {
   }
 
   function handleDeleteHistoryRow(row: DownloadRow) {
-    setDownloadState((current) => ({
-      ...current,
-      history: current.history.filter((item) => item.id !== row.id),
-    }));
+    setDownloadState((current) => deleteHistoryRow(current, row.id));
     pushToast(`已删除历史记录：${summarizeTitle(row.title)}`, 'info');
   }
 
@@ -1195,10 +1115,7 @@ export default function App() {
     downloadKeyByTaskId.current.delete(row.id);
     dismissedDownloadIds.current.add(row.id);
     notifiedDownloadIds.current.add(row.id);
-    setDownloadState((current) => ({
-      ...current,
-      current: current.current.filter((item) => item.id !== row.id),
-    }));
+    setDownloadState((current) => removeCurrentRow(current, row.id));
     pushToast(`已移除：${summarizeTitle(row.title)}`, 'info');
   }
 

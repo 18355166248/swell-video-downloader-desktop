@@ -1304,14 +1304,29 @@ body::before {
   transition: color 0.18s ease;
 }
 
-.format-row:hover {
+.format-row:hover,
+.format-row.is-submitting {
   transform: translateY(-2px);
   border-color: var(--accent);
   box-shadow: var(--shadow-md);
 }
 
-.format-row:hover::before {
+.format-row:hover::before,
+.format-row.is-submitting::before {
   color: var(--accent);
+}
+
+.format-row.is-submitting {
+  background: color-mix(in srgb, var(--accent) 9%, var(--paper-raised));
+}
+
+.format-row.is-submitting::after {
+  content: "";
+  position: absolute;
+  inset: 10px auto 10px 0;
+  width: 4px;
+  border-radius: 0 6px 6px 0;
+  background: var(--accent);
 }
 
 .format-info {

@@ -33,6 +33,8 @@ function formatStatus(status: string): string {
   switch (status) {
     case 'queued':
       return '排队中';
+    case 'starting':
+      return '加入队列中';
     case 'downloading':
       return '下载中';
     case 'postprocessing':
@@ -55,6 +57,7 @@ function statusTone(status: string): 'active' | 'done' | 'failed' | 'idle' {
   switch (status) {
     case 'downloading':
     case 'postprocessing':
+    case 'starting':
       return 'active';
     case 'completed':
       return 'done';

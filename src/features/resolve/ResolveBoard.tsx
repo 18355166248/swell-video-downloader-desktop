@@ -283,7 +283,12 @@ export function ResolveBoard({
                   <Text UNSAFE_className="format-list-title">选择要下载的版本</Text>
                   <ul className="format-list">
                     {openItem.resolved.formats.map((format) => (
-                      <li key={format.id} className="format-row">
+                      <li
+                        key={format.id}
+                        className={`format-row${
+                          downloadingIdsFor(openItem.url).has(format.id) ? ' is-submitting' : ''
+                        }`}
+                      >
                         <div className="format-info">
                           <Text UNSAFE_className="format-label">{format.label}</Text>
                           <Text UNSAFE_className="format-sub">
@@ -296,7 +301,7 @@ export function ResolveBoard({
                           onPress={() => onDownload(openItem, format)}
                           isPending={downloadingIdsFor(openItem.url).has(format.id)}
                         >
-                          下载
+                          {downloadingIdsFor(openItem.url).has(format.id) ? '加入中…' : '下载'}
                         </Button>
                       </li>
                     ))}
