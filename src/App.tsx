@@ -2,6 +2,12 @@ import { Button, InlineAlert, Text } from '@react-spectrum/s2';
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
+import {
+  createDownloadKey,
+  hasActiveDownloadForFormat,
+  upsertCurrentDownloadRow,
+  type DownloadBucketState,
+} from './features/downloads/download-state';
 import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
 import { DiagnosticPanel } from './features/resolve/DiagnosticPanel';
 import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
@@ -13,6 +19,7 @@ import {
   listenDownloadProgress,
   listenDownloadStatus,
 } from './lib/download-events';
+import { mapWithConcurrency } from './lib/async-pool';
 import {
   cancelDownload,
   checkDependencies,
@@ -43,15 +50,11 @@ import type {
   ResolveMediaResponse,
 } from './lib/types';
 
-type DownloadBucketState = {
-  current: DownloadRow[];
-  history: DownloadRow[];
-};
-
 type DownloadTab = 'current' | 'history' | 'retry';
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
+const RESOLVE_CONCURRENCY = 3;
 
 const HERO_STEPS = [
   { id: 1, label: '解析地址' },
@@ -364,6 +367,9 @@ export default function App() {
   const [batchQuality, setBatchQuality] = useState<BatchQuality>('best');
   const [autoDownload, setAutoDownload] = useState(false);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
+  const activeDownloadKeys = useRef<Set<string>>(new Set());
+  const downloadKeyByTaskId = useRef<Map<string, string>>(new Map());
+  const finishedBeforeKeyRegistered = useRef<Set<string>>(new Set());
   // Task ids the user removed from the list — late progress/status events for
   // these are ignored so a deleted row never re-appears.
   const dismissedDownloadIds = useRef<Set<string>>(new Set());
@@ -394,6 +400,24 @@ export default function App() {
   function reportError(message: string) {
     setError(message);
     pushToast(message, 'error');
+  }
+
+  function releaseActiveDownloadKey(taskId: string) {
+    const key = downloadKeyByTaskId.current.get(taskId);
+    if (!key) {
+      finishedBeforeKeyRegistered.current.add(taskId);
+      return;
+    }
+    activeDownloadKeys.current.delete(key);
+    downloadKeyByTaskId.current.delete(taskId);
+    finishedBeforeKeyRegistered.current.delete(taskId);
+  }
+
+  function registerActiveDownloadKey(taskId: string, key: string) {
+    downloadKeyByTaskId.current.set(taskId, key);
+    if (finishedBeforeKeyRegistered.current.has(taskId)) {
+      releaseActiveDownloadKey(taskId);
+    }
   }
 
   // Persist the current settings snapshot (with the just-changed field applied)
@@ -542,6 +566,14 @@ export default function App() {
               'error',
             );
           }
+        }
+
+        if (
+          payload.status === 'completed' ||
+          payload.status === 'failed' ||
+          payload.status === 'canceled'
+        ) {
+          releaseActiveDownloadKey(payload.task_id);
         }
 
         setDownloadState((current) => {
@@ -875,7 +907,7 @@ export default function App() {
     let lastFormatCount = 0;
     const failures: string[] = [];
 
-    for (const targetUrl of targetUrls) {
+    await mapWithConcurrency(targetUrls, RESOLVE_CONCURRENCY, async (targetUrl) => {
       if (!isActive()) {
         return;
       }
@@ -902,7 +934,7 @@ export default function App() {
         patchResolvedItem(targetUrl, { status: 'failed', error: message });
         failures.push(`${targetUrl}：${message}`);
       }
-    }
+    });
 
     if (!isActive()) {
       return;
@@ -936,8 +968,7 @@ export default function App() {
     entries: { url: string; resolved: ResolveMediaResponse }[],
     quality: BatchQuality,
   ): Promise<number> {
-    let ok = 0;
-    for (const entry of entries) {
+    const results = await Promise.all(entries.map(async (entry) => {
       const format = pickFormatForStrategy(entry.resolved, quality);
       const result = await enqueueDownload(
         entry.url,
@@ -947,13 +978,14 @@ export default function App() {
         false,
       );
       if (result.ok) {
-        ok += 1;
         patchResolvedItem(entry.url, {
           status: 'selected',
           selectedLabel: cleanFormatLabel(format.label),
         });
       }
-    }
+      return result;
+    }));
+    const ok = results.filter((result) => result.ok).length;
 
     pushToast(
       `已批量加入下载：${ok}/${entries.length} 个（${batchQualityLabel(quality)}）`,
@@ -1007,8 +1039,18 @@ export default function App() {
     sessionLabel: string,
     notifyStart: boolean,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
-    const downloadKey = `${targetUrl}::${format.id}`;
+    const downloadKey = createDownloadKey(targetUrl, format.id);
     setError('');
+    if (
+      activeDownloadKeys.current.has(downloadKey) ||
+      hasActiveDownloadForFormat(downloadState, targetUrl, format.id ?? null)
+    ) {
+      if (notifyStart) {
+        pushToast('这个视频版本已经在下载队列中。', 'info');
+      }
+      return { ok: false, message: '重复下载任务已跳过' };
+    }
+    activeDownloadKeys.current.add(downloadKey);
     setDownloadingIds((current) => new Set(current).add(downloadKey));
     try {
       const taskTitle = buildDownloadTitle(targetResolved.title, format);
@@ -1019,26 +1061,24 @@ export default function App() {
         selectedCookieSource,
         instagramBridgeCookiePath || cookieFilePath,
       );
-      setDownloadState((current) => ({
-        ...current,
-        current: [
-          {
-            id: taskId,
-            title: taskTitle,
-            sessionLabel,
-            status: 'queued',
-            progress: '0%',
-            sourceUrl: targetUrl,
-            formatId: format.id ?? null,
-          },
-          ...current.current,
-        ],
-      }));
+      registerActiveDownloadKey(taskId, downloadKey);
+      setDownloadState((current) =>
+        upsertCurrentDownloadRow(current, {
+          id: taskId,
+          title: taskTitle,
+          sessionLabel,
+          status: 'queued',
+          progress: '0%',
+          sourceUrl: targetUrl,
+          formatId: format.id ?? null,
+        }),
+      );
       if (notifyStart) {
         pushToast(`已开始下载：${summarizeTitle(taskTitle)}`, 'success');
       }
       return { ok: true };
     } catch (err) {
+      activeDownloadKeys.current.delete(downloadKey);
       const message = getTauriErrorMessage(err, '创建下载任务失败');
       reportError(message);
       return { ok: false, message };
@@ -1071,6 +1111,14 @@ export default function App() {
     let ok = 0;
     const failures: string[] = [];
     for (const row of retryable) {
+      const downloadKey = createDownloadKey(row.sourceUrl!, row.formatId);
+      if (
+        activeDownloadKeys.current.has(downloadKey) ||
+        hasActiveDownloadForFormat(downloadState, row.sourceUrl!, row.formatId)
+      ) {
+        continue;
+      }
+      activeDownloadKeys.current.add(downloadKey);
       try {
         const taskId = await startDownload(
           row.sourceUrl!,
@@ -1079,23 +1127,21 @@ export default function App() {
           selectedCookieSource,
           instagramBridgeCookiePath || cookieFilePath,
         );
-        setDownloadState((current) => ({
-          ...current,
-          current: [
-            {
-              id: taskId,
-              title: row.title,
-              sessionLabel: row.sessionLabel,
-              status: 'queued',
-              progress: '0%',
-              sourceUrl: row.sourceUrl,
-              formatId: row.formatId,
-            },
-            ...current.current,
-          ],
-        }));
+        registerActiveDownloadKey(taskId, downloadKey);
+        setDownloadState((current) =>
+          upsertCurrentDownloadRow(current, {
+            id: taskId,
+            title: row.title,
+            sessionLabel: row.sessionLabel,
+            status: 'queued',
+            progress: '0%',
+            sourceUrl: row.sourceUrl,
+            formatId: row.formatId,
+          }),
+        );
         ok += 1;
       } catch (err) {
+        activeDownloadKeys.current.delete(downloadKey);
         failures.push(`${summarizeTitle(row.title)}: ${getTauriErrorMessage(err, '重试失败')}`);
       }
     }
@@ -1131,6 +1177,10 @@ export default function App() {
         // Task may already have ended; removing the row is still fine.
       }
     }
+    if (row.sourceUrl) {
+      activeDownloadKeys.current.delete(createDownloadKey(row.sourceUrl, row.formatId));
+    }
+    downloadKeyByTaskId.current.delete(row.id);
     dismissedDownloadIds.current.add(row.id);
     notifiedDownloadIds.current.add(row.id);
     setDownloadState((current) => ({

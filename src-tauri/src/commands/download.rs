@@ -26,7 +26,6 @@ use crate::{
 };
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
-static SSSTWITTER_DOWNLOAD_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
 static DOWNLOAD_TASKS: OnceLock<Mutex<HashMap<String, DownloadTaskControl>>> = OnceLock::new();
 static DOWNLOAD_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
@@ -73,6 +72,7 @@ fn acquire_download_permit(cancel_requested: &AtomicBool) -> Option<DownloadPerm
 #[derive(Clone)]
 struct DownloadTaskControl {
     title: String,
+    download_key: String,
     cancel_requested: Arc<AtomicBool>,
 }
 
@@ -164,6 +164,14 @@ pub fn start_download(
     let task_id = format!("task-{}", DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed));
     let task_title = title.unwrap_or_else(|| "新下载任务".into());
     let cancel_requested = Arc::new(AtomicBool::new(false));
+    let download_key = download_task_key(&url, format_id.as_deref());
+
+    register_download_task(
+        task_id.clone(),
+        task_title.clone(),
+        download_key,
+        cancel_requested.clone(),
+    )?;
 
     emit_status(
         &app,
@@ -181,11 +189,6 @@ pub fn start_download(
 
     let app_handle = app.clone();
     let return_task_id = task_id.clone();
-    register_download_task(
-        task_id.clone(),
-        task_title.clone(),
-        cancel_requested.clone(),
-    )?;
     log::info!("[start_download] registered task_id={task_id} title={task_title}");
     thread::spawn(move || {
         let result = run_download_task(
@@ -258,15 +261,20 @@ pub fn cancel_download(app: AppHandle, task_id: String) -> Result<(), String> {
 fn register_download_task(
     task_id: String,
     title: String,
+    download_key: String,
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut tasks = download_tasks()
         .lock()
         .map_err(|_| "下载任务状态异常。".to_string())?;
+    if tasks.values().any(|task| task.download_key == download_key) {
+        return Err("这个视频版本已经在下载队列中。".into());
+    }
     tasks.insert(
         task_id,
         DownloadTaskControl {
             title,
+            download_key,
             cancel_requested,
         },
     );
@@ -281,6 +289,14 @@ fn unregister_download_task(task_id: &str) {
 
 fn download_tasks() -> &'static Mutex<HashMap<String, DownloadTaskControl>> {
     DOWNLOAD_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn download_task_key(url: &str, format_id: Option<&str>) -> String {
+    format!(
+        "{}::{}",
+        url.trim(),
+        format_id.map(str::trim).unwrap_or_default()
+    )
 }
 
 fn run_download_task(
@@ -328,6 +344,24 @@ fn run_download_task(
             );
         }
         log::info!("[run_download_task] task_id={task_id} x.com url but no ssstwitter selection decoded");
+    }
+
+    if let Some(existing_path) = find_existing_completed_download(&site_dir, &title) {
+        log::info!(
+            "[run_download_task] task_id={task_id} skipped existing file={}",
+            existing_path.display()
+        );
+        emit_status(
+            &app,
+            DownloadStatusPayload {
+                task_id,
+                title,
+                status: "completed".into(),
+                message: Some("文件已存在，已跳过下载".into()),
+                output_path: Some(existing_path.display().to_string()),
+            },
+        );
+        return Ok(());
     }
 
     let yt_dlp = resolve_yt_dlp(&app).ok_or_else(|| {
@@ -688,6 +722,30 @@ fn run_ssstwitter_download_task(
         selection.direct_url.is_some()
     );
     let file_title = compose_download_title(&title, Some(selection_label));
+    let output_path = category_dir(&download_dir, "mp4").join(format!(
+        "{}.{}",
+        sanitize_filename(&file_title),
+        "mp4"
+    ));
+
+    if output_path.is_file() {
+        log::info!(
+            "[run_ssstwitter_download_task] task_id={task_id} skipped existing file={}",
+            output_path.display()
+        );
+        emit_status(
+            &app,
+            DownloadStatusPayload {
+                task_id,
+                title,
+                status: "completed".into(),
+                message: Some("文件已存在，已跳过下载".into()),
+                output_path: Some(output_path.display().to_string()),
+            },
+        );
+        return Ok(());
+    }
+
     emit_status(
         &app,
         DownloadStatusPayload {
@@ -698,23 +756,6 @@ fn run_ssstwitter_download_task(
             output_path: None,
         },
     );
-    let slot = ssstwitter_download_slot();
-    let wait_notice_needed = slot.try_lock().is_err();
-    if wait_notice_needed {
-        emit_status(
-            &app,
-            DownloadStatusPayload {
-                task_id: task_id.clone(),
-                title: title.clone(),
-                status: "queued".into(),
-                message: Some("ssstwitter 下载通道繁忙，正在排队等待。".into()),
-                output_path: None,
-            },
-        );
-    }
-    let _slot_guard = slot
-        .lock()
-        .map_err(|_| "ssstwitter 下载通道状态异常。".to_string())?;
     if cancel_requested.load(Ordering::SeqCst) {
         return Err("下载已取消".into());
     }
@@ -729,9 +770,6 @@ fn run_ssstwitter_download_task(
         },
     );
 
-    // ssstwitter only serves x.com videos, so this always lands in 视频.
-    let output_path =
-        category_dir(&download_dir, "mp4").join(format!("{}.{}", sanitize_filename(&file_title), "mp4"));
     // Stream into the system temp dir, then move into Downloads on completion.
     // Windows Defender scans the Downloads folder far more aggressively (downloaded-
     // file / mark-of-the-web handling), throttling the active write; temp is lighter,
@@ -806,18 +844,11 @@ fn run_ssstwitter_download_task(
     Ok(())
 }
 
-fn ssstwitter_download_slot() -> &'static Mutex<()> {
-    SSSTWITTER_DOWNLOAD_SLOT.get_or_init(|| Mutex::new(()))
-}
-
 #[cfg(test)]
 fn with_ssstwitter_download_slot<F, T>(task: F) -> T
 where
     F: FnOnce() -> T,
 {
-    let _guard = ssstwitter_download_slot()
-        .lock()
-        .expect("ssstwitter download slot should not be poisoned");
     task()
 }
 
@@ -900,6 +931,43 @@ fn category_folder(ext: &str) -> &'static str {
 
 fn category_dir(site_dir: &Path, ext: &str) -> PathBuf {
     site_dir.join(category_folder(ext))
+}
+
+fn completed_download_candidate_dirs(site_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        site_dir.to_path_buf(),
+        site_dir.join("视频"),
+        site_dir.join("图片"),
+        site_dir.join("音频"),
+        site_dir.join("其他"),
+    ]
+}
+
+fn find_existing_completed_download(site_dir: &Path, title: &str) -> Option<PathBuf> {
+    let expected_stem = sanitize_filename(title);
+
+    for dir in completed_download_candidate_dirs(site_dir) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+
+            if stem == expected_stem {
+                return Some(path);
+            }
+        }
+    }
+
+    None
 }
 
 /// Move a finished file into its resource-type folder under `site_dir`, returning
@@ -1146,15 +1214,18 @@ mod tests {
     use super::{
         apply_download_progress_args,
         category_dir, category_folder, clean_format_descriptor, compose_download_title,
-        decode_secret, direct_download_url, effective_download_dir, encode_secret,
-        extract_ssstwitter_selection, format_eta, normalize_optional, requires_binary_toolchain,
-        sanitize_filename, site_folder, site_target_dir, staging_path_for,
+        decode_secret, direct_download_url, download_task_key, effective_download_dir, encode_secret,
+        find_existing_completed_download,
+        extract_ssstwitter_selection, format_eta, normalize_optional, register_download_task,
+        requires_binary_toolchain, sanitize_filename, site_folder, site_target_dir, staging_path_for,
+        unregister_download_task,
         with_ssstwitter_download_slot,
     };
     use std::{
+        env, fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::mpsc,
+        sync::{atomic::AtomicBool, Arc, mpsc},
         thread,
         time::{Duration, Instant},
     };
@@ -1197,6 +1268,45 @@ mod tests {
             .expect("selection should decode");
         assert_eq!(selection.label, "下载 HD 1080x1080");
         assert_eq!(selection.direct_url, None);
+    }
+
+    #[test]
+    fn rejects_duplicate_active_download_task_keys() {
+        let key = download_task_key(" https://example.com/video ", Some(" best "));
+        let first_task = "unit-duplicate-task-1";
+        let second_task = "unit-duplicate-task-2";
+        unregister_download_task(first_task);
+        unregister_download_task(second_task);
+
+        register_download_task(
+            first_task.into(),
+            "第一个".into(),
+            key.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("first task should register");
+
+        let duplicate = register_download_task(
+            second_task.into(),
+            "第二个".into(),
+            key.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect_err("same active download key should be rejected");
+
+        assert!(duplicate.contains("下载队列"));
+
+        unregister_download_task(first_task);
+
+        register_download_task(
+            second_task.into(),
+            "第二个".into(),
+            key,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("key should be reusable after the first task is unregistered");
+
+        unregister_download_task(second_task);
     }
 
     #[test]
@@ -1298,6 +1408,46 @@ mod tests {
     }
 
     #[test]
+    fn finds_existing_download_after_category_relocation() {
+        let temp_dir = env::temp_dir().join(format!(
+            "swell-existing-download-test-{}",
+            std::process::id()
+        ));
+        let site_dir = temp_dir.join("instagram.com");
+        let completed_path = category_dir(&site_dir, "mp4").join("测试视频.mp4");
+        fs::create_dir_all(completed_path.parent().expect("path should have parent"))
+            .expect("fixture directory should be writable");
+        fs::write(&completed_path, "already downloaded").expect("fixture should be writable");
+
+        let existing = find_existing_completed_download(&site_dir, "测试视频")
+            .expect("existing categorized download should be detected");
+
+        assert_eq!(existing, completed_path);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn finds_existing_download_in_other_category() {
+        let temp_dir = env::temp_dir().join(format!(
+            "swell-existing-other-download-test-{}",
+            std::process::id()
+        ));
+        let site_dir = temp_dir.join("example.com");
+        let completed_path = category_dir(&site_dir, "srt").join("字幕文件.srt");
+        fs::create_dir_all(completed_path.parent().expect("path should have parent"))
+            .expect("fixture directory should be writable");
+        fs::write(&completed_path, "already downloaded").expect("fixture should be writable");
+
+        let existing = find_existing_completed_download(&site_dir, "字幕文件")
+            .expect("existing download in other category should be detected");
+
+        assert_eq!(existing, completed_path);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn stores_partial_files_inside_visible_incomplete_folder() {
         let path = staging_path_for(Path::new(r"C:\Downloads\video-downloader"), "task-42");
 
@@ -1333,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_ssstwitter_downloads_through_single_slot() {
+    fn does_not_serialize_ssstwitter_downloads_through_single_slot() {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
 
@@ -1349,17 +1499,26 @@ mod tests {
             .expect("holder should enter slot first");
 
         let started_at = Instant::now();
-        let waiter = thread::spawn(move || with_ssstwitter_download_slot(|| Instant::now()));
+        let (waiter_tx, waiter_rx) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            with_ssstwitter_download_slot(|| {
+                waiter_tx
+                    .send(Instant::now())
+                    .expect("waiter should report entry");
+            });
+        });
 
-        thread::sleep(Duration::from_millis(150));
+        let entered_at = waiter_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("second ssstwitter download should enter without waiting for the first");
+
         release_tx.send(()).expect("release signal should be sent");
-
-        let entered_at = waiter.join().expect("waiter should complete");
         holder.join().expect("holder should complete");
+        waiter.join().expect("waiter should complete");
 
         assert!(
-            entered_at.duration_since(started_at) >= Duration::from_millis(140),
-            "second download should wait for the first ssstwitter slot"
+            entered_at.duration_since(started_at) < Duration::from_millis(140),
+            "ssstwitter downloads should be governed by the global download limit, not a single slot"
         );
     }
 }
