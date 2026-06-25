@@ -116,4 +116,5 @@ export type AppSettings = {
   instagramCollectMode: InstagramCollectMode;
   instagramCollectCount: string;
   autoDownload: boolean;
+  downloadConcurrency: number;
 };

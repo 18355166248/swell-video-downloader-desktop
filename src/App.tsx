@@ -21,6 +21,10 @@ import {
 } from './lib/download-events';
 import { mapWithConcurrency } from './lib/async-pool';
 import {
+  DEFAULT_DOWNLOAD_CONCURRENCY,
+  normalizeDownloadConcurrency,
+} from './lib/settings';
+import {
   cancelDownload,
   checkDependencies,
   collectInstagramTargets,
@@ -54,7 +58,6 @@ type DownloadTab = 'current' | 'history' | 'retry';
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
-const RESOLVE_CONCURRENCY = 3;
 
 const HERO_STEPS = [
   { id: 1, label: '解析地址' },
@@ -366,6 +369,7 @@ export default function App() {
   const [isSessionIdHelpOpen, setIsSessionIdHelpOpen] = useState(false);
   const [batchQuality, setBatchQuality] = useState<BatchQuality>('best');
   const [autoDownload, setAutoDownload] = useState(false);
+  const [downloadConcurrency, setDownloadConcurrency] = useState(DEFAULT_DOWNLOAD_CONCURRENCY);
   const notifiedDownloadIds = useRef<Set<string>>(new Set());
   const activeDownloadKeys = useRef<Set<string>>(new Set());
   const downloadKeyByTaskId = useRef<Map<string, string>>(new Map());
@@ -433,6 +437,7 @@ export default function App() {
       instagramCollectMode,
       instagramCollectCount,
       autoDownload,
+      downloadConcurrency,
       ...partial,
     };
     void saveAppSettings(snapshot).catch((err) => {
@@ -475,6 +480,12 @@ export default function App() {
     persistSettings({ autoDownload: value });
   }
 
+  function handleDownloadConcurrencyChange(value: number) {
+    const normalized = normalizeDownloadConcurrency(value);
+    setDownloadConcurrency(normalized);
+    persistSettings({ downloadConcurrency: normalized });
+  }
+
   useEffect(() => {
     async function loadSettingsData() {
       const [sources, dependencies, dirSettings, appSettings] = await Promise.all([
@@ -500,6 +511,7 @@ export default function App() {
       setInstagramCollectMode(appSettings.instagramCollectMode);
       setInstagramCollectCount(appSettings.instagramCollectCount);
       setAutoDownload(appSettings.autoDownload);
+      setDownloadConcurrency(appSettings.downloadConcurrency);
       setDependencyStatus(dependencies);
       setDownloadDirectorySettings(dirSettings);
       setDownloadDirState(dirSettings.currentDir);
@@ -907,7 +919,7 @@ export default function App() {
     let lastFormatCount = 0;
     const failures: string[] = [];
 
-    await mapWithConcurrency(targetUrls, RESOLVE_CONCURRENCY, async (targetUrl) => {
+    await mapWithConcurrency(targetUrls, downloadConcurrency, async (targetUrl) => {
       if (!isActive()) {
         return;
       }
@@ -1502,6 +1514,7 @@ export default function App() {
         instagramCollectMode={instagramCollectMode}
         instagramCollectCount={instagramCollectCount}
         autoDownload={autoDownload}
+        downloadConcurrency={downloadConcurrency}
         dependencyStatus={dependencyStatus}
         downloadDirectory={downloadDirectorySettings}
         downloadDirectoryDraft={downloadDirectoryDraft}
@@ -1513,6 +1526,7 @@ export default function App() {
         onInstagramCollectModeChange={handleInstagramCollectModeChange}
         onInstagramCollectCountChange={handleInstagramCollectCountChange}
         onAutoDownloadChange={handleAutoDownloadChange}
+        onDownloadConcurrencyChange={handleDownloadConcurrencyChange}
         onDownloadDirectoryDraftChange={setDownloadDirectoryDraft}
         onSaveDownloadDirectory={handleSaveDownloadDirectory}
         onResetDownloadDirectory={handleResetDownloadDirectory}

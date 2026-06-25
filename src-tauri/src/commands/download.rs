@@ -27,15 +27,17 @@ use crate::{
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DOWNLOAD_TASKS: OnceLock<Mutex<HashMap<String, DownloadTaskControl>>> = OnceLock::new();
-static DOWNLOAD_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+static DOWNLOAD_ACTIVE_COUNT: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
 /// Cap on simultaneously running downloads. Batch actions (e.g. "download all 50")
 /// enqueue many tasks at once; without a cap they would each spawn a yt-dlp
 /// process immediately and swamp the network/CPU. Extra tasks wait as "queued".
-const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 3;
+const MIN_DOWNLOAD_CONCURRENCY: usize = 1;
+const MAX_DOWNLOAD_CONCURRENCY: usize = 8;
 
-fn download_permits() -> &'static (Mutex<usize>, Condvar) {
-    DOWNLOAD_PERMITS.get_or_init(|| (Mutex::new(MAX_CONCURRENT_DOWNLOADS), Condvar::new()))
+fn download_active_count() -> &'static (Mutex<usize>, Condvar) {
+    DOWNLOAD_ACTIVE_COUNT.get_or_init(|| (Mutex::new(0), Condvar::new()))
 }
 
 /// Holds one download permit; releases it back to the pool on drop.
@@ -43,9 +45,9 @@ struct DownloadPermit;
 
 impl Drop for DownloadPermit {
     fn drop(&mut self) {
-        let (mutex, condvar) = download_permits();
-        if let Ok(mut available) = mutex.lock() {
-            *available += 1;
+        let (mutex, condvar) = download_active_count();
+        if let Ok(mut active) = mutex.lock() {
+            *active = active.saturating_sub(1);
             condvar.notify_one();
         }
     }
@@ -53,19 +55,20 @@ impl Drop for DownloadPermit {
 
 /// Acquire a permit, waiting while the pool is empty. Returns `None` if the task
 /// is canceled while still waiting in the queue.
-fn acquire_download_permit(cancel_requested: &AtomicBool) -> Option<DownloadPermit> {
-    let (mutex, condvar) = download_permits();
-    let mut available = mutex.lock().ok()?;
-    while *available == 0 {
+fn acquire_download_permit(
+    cancel_requested: &AtomicBool,
+    max_concurrent_downloads: usize,
+) -> Option<DownloadPermit> {
+    let (mutex, condvar) = download_active_count();
+    let mut active = mutex.lock().ok()?;
+    while *active >= max_concurrent_downloads {
         if cancel_requested.load(Ordering::SeqCst) {
             return None;
         }
-        let (guard, _timeout) = condvar
-            .wait_timeout(available, Duration::from_millis(200))
-            .ok()?;
-        available = guard;
+        let (guard, _timeout) = condvar.wait_timeout(active, Duration::from_millis(200)).ok()?;
+        active = guard;
     }
-    *available -= 1;
+    *active += 1;
     Some(DownloadPermit)
 }
 
@@ -106,6 +109,7 @@ struct AppSettings {
     instagram_collect_mode: Option<String>,
     instagram_collect_count: Option<String>,
     auto_download: Option<bool>,
+    download_concurrency: Option<usize>,
 }
 
 /// Settings exposed to the UI (sessionid decoded back to plain text).
@@ -118,6 +122,7 @@ pub struct AppSettingsPayload {
     pub instagram_collect_mode: Option<String>,
     pub instagram_collect_count: Option<String>,
     pub auto_download: Option<bool>,
+    pub download_concurrency: usize,
 }
 
 /// Full snapshot of UI-editable settings sent on every save.
@@ -130,6 +135,7 @@ pub struct AppSettingsUpdate {
     pub instagram_collect_mode: Option<String>,
     pub instagram_collect_count: Option<String>,
     pub auto_download: Option<bool>,
+    pub download_concurrency: Option<usize>,
 }
 
 #[derive(Clone, Serialize)]
@@ -185,6 +191,8 @@ pub fn start_download(
     );
 
     let download_dir = resolve_download_dir(&app)?;
+    let download_concurrency =
+        normalize_download_concurrency(load_app_settings(&app)?.download_concurrency);
     log::info!("[start_download] resolved download_dir={}", download_dir.display());
 
     let app_handle = app.clone();
@@ -200,6 +208,7 @@ pub fn start_download(
             cookie_source,
             cookie_file_path,
             download_dir,
+            download_concurrency,
             cancel_requested,
         );
         unregister_download_task(&task_id);
@@ -308,6 +317,7 @@ fn run_download_task(
     cookie_source: Option<String>,
     cookie_file_path: Option<String>,
     download_dir: PathBuf,
+    download_concurrency: usize,
     cancel_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
     log::info!(
@@ -316,7 +326,7 @@ fn run_download_task(
     );
     // Wait for a concurrency slot so batch downloads don't all start at once.
     // The task stays "queued" (already emitted) until a permit frees up.
-    let _permit = match acquire_download_permit(&cancel_requested) {
+    let _permit = match acquire_download_permit(&cancel_requested, download_concurrency) {
         Some(permit) => permit,
         None => return Err("下载已取消".into()),
     };
@@ -1030,6 +1040,12 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
         .filter(|item| !item.is_empty())
 }
 
+fn normalize_download_concurrency(value: Option<usize>) -> usize {
+    value
+        .unwrap_or(DEFAULT_DOWNLOAD_CONCURRENCY)
+        .clamp(MIN_DOWNLOAD_CONCURRENCY, MAX_DOWNLOAD_CONCURRENCY)
+}
+
 fn settings_to_payload(settings: &AppSettings) -> AppSettingsPayload {
     AppSettingsPayload {
         cookie_source: settings.cookie_source.clone(),
@@ -1042,6 +1058,7 @@ fn settings_to_payload(settings: &AppSettings) -> AppSettingsPayload {
         instagram_collect_mode: settings.instagram_collect_mode.clone(),
         instagram_collect_count: settings.instagram_collect_count.clone(),
         auto_download: settings.auto_download,
+        download_concurrency: normalize_download_concurrency(settings.download_concurrency),
     }
 }
 
@@ -1066,6 +1083,8 @@ pub fn set_app_settings(
     stored.instagram_sessionid_b64 =
         normalize_optional(settings.instagram_sessionid).map(|value| encode_secret(&value));
     stored.auto_download = settings.auto_download;
+    stored.download_concurrency =
+        Some(normalize_download_concurrency(settings.download_concurrency));
 
     save_app_settings(&app, &stored)?;
     Ok(settings_to_payload(&stored))
@@ -1214,12 +1233,12 @@ mod tests {
     use super::{
         apply_download_progress_args,
         category_dir, category_folder, clean_format_descriptor, compose_download_title,
-        decode_secret, direct_download_url, download_task_key, effective_download_dir, encode_secret,
-        find_existing_completed_download,
-        extract_ssstwitter_selection, format_eta, normalize_optional, register_download_task,
-        requires_binary_toolchain, sanitize_filename, site_folder, site_target_dir, staging_path_for,
-        unregister_download_task,
-        with_ssstwitter_download_slot,
+        decode_secret, direct_download_url, download_task_key, effective_download_dir,
+        encode_secret, extract_ssstwitter_selection, find_existing_completed_download, format_eta,
+        normalize_download_concurrency, normalize_optional, register_download_task,
+        requires_binary_toolchain, sanitize_filename, site_folder, site_target_dir,
+        staging_path_for, unregister_download_task, with_ssstwitter_download_slot,
+        DEFAULT_DOWNLOAD_CONCURRENCY, MAX_DOWNLOAD_CONCURRENCY, MIN_DOWNLOAD_CONCURRENCY,
     };
     use std::{
         env, fs,
@@ -1365,6 +1384,14 @@ mod tests {
         assert_eq!(normalize_optional(Some("  hi  ".into())).as_deref(), Some("hi"));
         assert_eq!(normalize_optional(Some("   ".into())), None);
         assert_eq!(normalize_optional(None), None);
+    }
+
+    #[test]
+    fn normalizes_download_concurrency_setting() {
+        assert_eq!(normalize_download_concurrency(None), DEFAULT_DOWNLOAD_CONCURRENCY);
+        assert_eq!(normalize_download_concurrency(Some(0)), MIN_DOWNLOAD_CONCURRENCY);
+        assert_eq!(normalize_download_concurrency(Some(4)), 4);
+        assert_eq!(normalize_download_concurrency(Some(99)), MAX_DOWNLOAD_CONCURRENCY);
     }
 
     #[test]

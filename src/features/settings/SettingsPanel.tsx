@@ -8,6 +8,7 @@ import type {
   DownloadDirectorySettings,
   InstagramCollectMode,
 } from '../../lib/types';
+import { MAX_DOWNLOAD_CONCURRENCY, MIN_DOWNLOAD_CONCURRENCY } from '../../lib/settings';
 
 const INSTAGRAM_MODE_OPTIONS: { id: InstagramCollectMode; label: string }[] = [
   { id: 'single', label: '当前链接（单条）' },
@@ -15,6 +16,14 @@ const INSTAGRAM_MODE_OPTIONS: { id: InstagramCollectMode; label: string }[] = [
   { id: 'profile_recent', label: '用户主页最近内容' },
   { id: 'story_experimental', label: 'Story（实验性）' },
 ];
+
+const DOWNLOAD_CONCURRENCY_OPTIONS = Array.from(
+  { length: MAX_DOWNLOAD_CONCURRENCY - MIN_DOWNLOAD_CONCURRENCY + 1 },
+  (_item, index) => {
+    const value = MIN_DOWNLOAD_CONCURRENCY + index;
+    return { id: String(value), label: `${value} 个任务` };
+  },
+);
 
 export type SettingsPanelProps = {
   cookieSources: CookieSource[];
@@ -25,6 +34,7 @@ export type SettingsPanelProps = {
   instagramCollectMode: InstagramCollectMode;
   instagramCollectCount: string;
   autoDownload: boolean;
+  downloadConcurrency: number;
   dependencyStatus: DependencyStatus | null;
   downloadDirectory: DownloadDirectorySettings | null;
   downloadDirectoryDraft: string;
@@ -36,6 +46,7 @@ export type SettingsPanelProps = {
   onInstagramCollectModeChange: (value: InstagramCollectMode) => void;
   onInstagramCollectCountChange: (value: string) => void;
   onAutoDownloadChange: (value: boolean) => void;
+  onDownloadConcurrencyChange: (value: number) => void;
   onDownloadDirectoryDraftChange: (value: string) => void;
   onSaveDownloadDirectory: () => void;
   onResetDownloadDirectory: () => void;
@@ -117,6 +128,14 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 onChange={(event) => props.onAutoDownloadChange(event.target.checked)}
               />
             </label>
+            <Picker
+              label="同时下载数"
+              selectedKey={String(props.downloadConcurrency)}
+              onSelectionChange={(key) => props.onDownloadConcurrencyChange(Number(key))}
+              items={DOWNLOAD_CONCURRENCY_OPTIONS}
+            >
+              {(item) => <PickerItem>{item.label}</PickerItem>}
+            </Picker>
             <div className="download-dir-settings">
               <TextField
                 label="下载目录"

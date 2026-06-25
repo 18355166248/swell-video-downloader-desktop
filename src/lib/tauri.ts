@@ -12,6 +12,7 @@ import type {
   InstagramCollectMode,
   ResolveMediaResponse,
 } from './types';
+import { normalizeDownloadConcurrency } from './settings';
 
 type MediaFormatWire = {
   id: string;
@@ -246,6 +247,7 @@ type AppSettingsWire = {
   instagram_collect_mode?: string | null;
   instagram_collect_count?: string | null;
   auto_download?: boolean | null;
+  download_concurrency?: number | null;
 };
 
 function mapAppSettings(wire: AppSettingsWire): AppSettings {
@@ -257,6 +259,7 @@ function mapAppSettings(wire: AppSettingsWire): AppSettings {
     instagramCollectMode: (wire.instagram_collect_mode as InstagramCollectMode) || 'single',
     instagramCollectCount: wire.instagram_collect_count ?? '1',
     autoDownload: wire.auto_download ?? false,
+    downloadConcurrency: normalizeDownloadConcurrency(wire.download_concurrency),
   };
 }
 
@@ -276,6 +279,7 @@ export async function saveAppSettings(settings: AppSettings): Promise<AppSetting
       instagram_collect_mode: settings.instagramCollectMode || null,
       instagram_collect_count: settings.instagramCollectCount || null,
       auto_download: settings.autoDownload,
+      download_concurrency: normalizeDownloadConcurrency(settings.downloadConcurrency),
     },
   });
   return mapAppSettings(wire);

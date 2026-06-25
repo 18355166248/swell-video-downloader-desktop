@@ -11,7 +11,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:build:debug": "tauri build --debug",
-    "test:frontend": "node scripts/download-state.test.mjs && node scripts/async-pool.test.mjs",
+    "test:frontend": "node scripts/download-state.test.mjs && node scripts/async-pool.test.mjs && node scripts/settings.test.mjs",
     "setup:ffmpeg": "node scripts/setup-ffmpeg.mjs",
     "postinstall": "node scripts/setup-ffmpeg.mjs",
     "instagram:collector": "node scripts/instagram-collector.mjs"
