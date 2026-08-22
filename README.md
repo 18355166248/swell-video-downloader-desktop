@@ -33,6 +33,30 @@
 - Instagram 设计说明：`docs/superpowers/specs/2026-06-21-instagram-support-design.md`
 - Instagram 实施计划：`docs/superpowers/plans/2026-06-21-instagram-support.md`
 
+## 开发运行
+
+本仓库用 **pnpm**（`pnpm-lock.yaml`），且 `src-tauri/tauri.conf.json` 里的
+`beforeDevCommand` / `beforeBuildCommand` 直接写死了 `pnpm dev` / `pnpm build`。
+所以 pnpm 必须在 PATH 上，否则 `tauri dev` 会以
+「'pnpm' 不是内部或外部命令」退出。
+
+```bash
+pnpm install
+pnpm tauri:dev
+```
+
+没装 pnpm 时用 `npm i -g pnpm` 或 `corepack enable pnpm` 装一个。
+
+临时环境里实在拿不到 pnpm，可以自己起前端、再让 Tauri 跳过那一步（仓库文件不用改）：
+
+```bash
+npx vite
+```
+
+```bash
+npx tauri dev --config '{"build":{"beforeDevCommand":""}}'
+```
+
 ## 二进制依赖
 
 项目运行时默认优先查找项目内置二进制，其次才回退到系统 PATH。
