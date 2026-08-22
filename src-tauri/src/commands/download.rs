@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -456,7 +456,7 @@ fn run_download_task(
 
     let final_path = Arc::new(Mutex::new(None::<String>));
     let last_error = Arc::new(Mutex::new(None::<String>));
-    let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_lines = Arc::new(Mutex::new(VecDeque::<String>::new()));
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -541,12 +541,13 @@ fn run_download_task(
             .map(normalize_yt_dlp_error)
             .unwrap_or_else(|| "下载失败，请查看日志输出".into());
 
-        // Dump the full yt-dlp output so post-mortem analysis has the context.
+        // Dump the retained yt-dlp output so post-mortem analysis has the context.
         if let Ok(lines) = stderr_lines.lock() {
             log::error!(
-                "[run_download_task] task_id={task_id} yt-dlp exited with code {:?}, full output ({} lines):",
+                "[run_download_task] task_id={task_id} yt-dlp exited with code {:?}, last {} output line(s) (capped at {}):",
                 status.code(),
-                lines.len()
+                lines.len(),
+                MAX_RETAINED_OUTPUT_LINES
             );
             for line in lines.iter() {
                 log::error!("[yt-dlp raw] task_id={task_id} {line}");
@@ -567,6 +568,21 @@ fn run_download_task(
     }
 }
 
+/// Cap on the yt-dlp output held in memory for the post-mortem dump. A fragmented
+/// HLS download prints a line per fragment, so an uncapped buffer grows with the
+/// video length; when something fails it is the tail that explains why.
+const MAX_RETAINED_OUTPUT_LINES: usize = 200;
+
+/// Keep the most recent [`MAX_RETAINED_OUTPUT_LINES`] lines, dropping the oldest.
+fn retain_output_line(lines: &Arc<Mutex<VecDeque<String>>>, line: &str) {
+    if let Ok(mut lines) = lines.lock() {
+        while lines.len() >= MAX_RETAINED_OUTPUT_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line.to_string());
+    }
+}
+
 fn pump_reader<R: Read>(
     reader: R,
     app: &AppHandle,
@@ -574,7 +590,7 @@ fn pump_reader<R: Read>(
     title: &str,
     final_path: &Arc<Mutex<Option<String>>>,
     last_error: &Arc<Mutex<Option<String>>>,
-    stderr_lines: &Arc<Mutex<Vec<String>>>,
+    stderr_lines: &Arc<Mutex<VecDeque<String>>>,
 ) {
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
         handle_download_line(app, task_id, title, &line, final_path, last_error, stderr_lines);
@@ -588,7 +604,7 @@ fn handle_download_line(
     line: &str,
     final_path: &Arc<Mutex<Option<String>>>,
     last_error: &Arc<Mutex<Option<String>>>,
-    stderr_lines: &Arc<Mutex<Vec<String>>>,
+    stderr_lines: &Arc<Mutex<VecDeque<String>>>,
 ) {
     if let Some(payload) = line.strip_prefix("__PROGRESS__:") {
         let mut parts = payload.split('|');
@@ -608,11 +624,9 @@ fn handle_download_line(
         return;
     }
 
-    // Accumulate all non-progress lines for debugging (yt-dlp writes diagnostics,
-    // warnings, and errors to stderr; some useful context also goes to stdout).
-    if let Ok(mut lines) = stderr_lines.lock() {
-        lines.push(line.to_string());
-    }
+    // Retain non-progress lines for debugging (yt-dlp writes diagnostics, warnings,
+    // and errors to stderr; some useful context also goes to stdout).
+    retain_output_line(stderr_lines, line);
 
     if let Some(path) = line.strip_prefix("__FINAL_PATH__:") {
         if let Ok(mut stored) = final_path.lock() {
@@ -1328,7 +1342,8 @@ fn sanitize_filename(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cookie_source, apply_download_progress_args,
+        apply_cookie_source, apply_download_progress_args, retain_output_line,
+        MAX_RETAINED_OUTPUT_LINES,
         category_dir, category_folder, clean_format_descriptor, compose_download_title,
         decode_secret, direct_download_url, discard_staging_file, download_task_key,
         effective_download_dir, encode_secret, extract_ssstwitter_selection,
@@ -1339,10 +1354,11 @@ mod tests {
         DEFAULT_DOWNLOAD_CONCURRENCY, MAX_DOWNLOAD_CONCURRENCY, MIN_DOWNLOAD_CONCURRENCY,
     };
     use std::{
+        collections::VecDeque,
         env, fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::{atomic::AtomicBool, Arc, mpsc},
+        sync::{atomic::AtomicBool, Arc, mpsc, Mutex},
         thread,
         time::{Duration, Instant},
     };
@@ -1704,6 +1720,28 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&site_dir);
+    }
+
+
+    #[test]
+    fn retained_output_keeps_the_last_lines_only() {
+        let lines = Arc::new(Mutex::new(VecDeque::new()));
+        let total = MAX_RETAINED_OUTPUT_LINES + 50;
+
+        for index in 0..total {
+            retain_output_line(&lines, &format!("line-{index}"));
+        }
+
+        let retained = lines.lock().expect("buffer should be readable");
+        assert_eq!(retained.len(), MAX_RETAINED_OUTPUT_LINES);
+        assert_eq!(
+            retained.front().map(String::as_str),
+            Some(format!("line-{}", total - MAX_RETAINED_OUTPUT_LINES).as_str())
+        );
+        assert_eq!(
+            retained.back().map(String::as_str),
+            Some(format!("line-{}", total - 1).as_str())
+        );
     }
 
 }

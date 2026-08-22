@@ -8,13 +8,55 @@
 
 #[cfg(windows)]
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use crate::platform::spawn::hide_console_window;
 
+/// How long a detection result stays good. On Windows the lookup shells out to
+/// `reg query` twice, and every resolve, download, page-title fetch and ssstwitter
+/// request asks for the proxy — a 50-link batch would otherwise spawn hundreds of
+/// processes. Short enough that toggling the proxy still takes effect on its own.
+const PROXY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static PROXY_CACHE: OnceLock<Mutex<Option<(Instant, Option<String>)>>> = OnceLock::new();
+
+fn proxy_cache() -> &'static Mutex<Option<(Instant, Option<String>)>> {
+    PROXY_CACHE.get_or_init(|| Mutex::new(None))
+}
+
 /// Returns a proxy URL (e.g. `http://127.0.0.1:7897`) to route requests through,
 /// preferring the standard env vars and falling back to the Windows system proxy.
+/// The answer is cached for [`PROXY_CACHE_TTL`].
 pub fn detect_proxy() -> Option<String> {
+    if let Ok(cache) = proxy_cache().lock() {
+        if let Some((checked_at, proxy)) = cache.as_ref() {
+            if checked_at.elapsed() < PROXY_CACHE_TTL {
+                return proxy.clone();
+            }
+        }
+    }
+
+    let detected = detect_proxy_uncached();
+
+    if let Ok(mut cache) = proxy_cache().lock() {
+        *cache = Some((Instant::now(), detected.clone()));
+    }
+
+    detected
+}
+
+/// Drop the cached result so the next [`detect_proxy`] call re-detects. Used by the
+/// tests; the app itself relies on the TTL.
+#[cfg(test)]
+fn clear_proxy_cache() {
+    if let Ok(mut cache) = proxy_cache().lock() {
+        *cache = None;
+    }
+}
+
+fn detect_proxy_uncached() -> Option<String> {
     if let Some(proxy) = env_proxy() {
         return Some(proxy);
     }
@@ -122,7 +164,7 @@ fn ensure_scheme(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_scheme, parse_proxy_server};
+    use super::{clear_proxy_cache, detect_proxy, ensure_scheme, parse_proxy_server};
 
     #[test]
     fn parses_bare_host_port() {
@@ -143,5 +185,25 @@ mod tests {
     #[test]
     fn keeps_explicit_scheme() {
         assert_eq!(ensure_scheme("socks5://127.0.0.1:7897"), "socks5://127.0.0.1:7897");
+    }
+
+    /// The cache is what keeps a 50-link batch from shelling out to `reg query`
+    /// hundreds of times: a change made after the first lookup is not observed
+    /// again until the TTL expires.
+    #[test]
+    fn repeated_detection_reuses_the_cached_result() {
+        clear_proxy_cache();
+        std::env::set_var("HTTPS_PROXY", "127.0.0.1:7897");
+        let first = detect_proxy();
+        assert_eq!(first.as_deref(), Some("http://127.0.0.1:7897"));
+
+        std::env::set_var("HTTPS_PROXY", "127.0.0.1:1080");
+        assert_eq!(detect_proxy(), first, "the cached value should be reused");
+
+        clear_proxy_cache();
+        assert_eq!(detect_proxy().as_deref(), Some("http://127.0.0.1:1080"));
+
+        std::env::remove_var("HTTPS_PROXY");
+        clear_proxy_cache();
     }
 }
