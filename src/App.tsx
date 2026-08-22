@@ -30,6 +30,7 @@ import {
   type DownloadProgressPayload,
 } from './lib/download-events';
 import { mapWithConcurrency } from './lib/async-pool';
+import { addBounded } from './lib/bounded-set';
 import { createProgressBuffer, type ProgressBuffer } from './lib/progress-buffer';
 import { useEventCallback } from './lib/use-event-callback';
 import {
@@ -80,6 +81,10 @@ const TOAST_LIMIT = 4;
 // and applied on this interval — one state update for the whole batch instead of
 // one per line, with only the latest tick per task surviving.
 const PROGRESS_FLUSH_MS = 200;
+// Cap on the remembered task ids ("already toasted", "user removed this row").
+// Far above any plausible number of in-flight downloads, so an id is only ever
+// evicted long after its task stopped emitting events.
+const REMEMBERED_TASK_IDS_LIMIT = 500;
 
 const HERO_STEPS = [
   { id: 1, label: '解析地址' },
@@ -534,7 +539,7 @@ export default function App() {
           (payload.status === 'completed' || payload.status === 'failed') &&
           !notifiedDownloadIds.current.has(payload.task_id)
         ) {
-          notifiedDownloadIds.current.add(payload.task_id);
+          addBounded(notifiedDownloadIds.current, payload.task_id, REMEMBERED_TASK_IDS_LIMIT);
 
           if (payload.status === 'completed') {
             pushToast(`下载完成：${summarizeTitle(payload.title)}`, 'success');
@@ -577,7 +582,11 @@ export default function App() {
             return;
           }
           if (payload.task_id) {
-            notifiedDownloadIds.current.add(payload.task_id);
+            addBounded(
+              notifiedDownloadIds.current,
+              payload.task_id,
+              REMEMBERED_TASK_IDS_LIMIT,
+            );
           }
           reportError(payload.message);
         }
@@ -1200,8 +1209,8 @@ export default function App() {
       activeDownloadKeys.current.delete(createDownloadKey(row.sourceUrl, row.formatId));
     }
     downloadKeyByTaskId.current.delete(row.id);
-    dismissedDownloadIds.current.add(row.id);
-    notifiedDownloadIds.current.add(row.id);
+    addBounded(dismissedDownloadIds.current, row.id, REMEMBERED_TASK_IDS_LIMIT);
+    addBounded(notifiedDownloadIds.current, row.id, REMEMBERED_TASK_IDS_LIMIT);
     progressBuffer.drop(row.id);
     setDownloadState((current) => removeCurrentRow(current, row.id));
     pushToast(`已移除：${summarizeTitle(row.title)}`, 'info');
