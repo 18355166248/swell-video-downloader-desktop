@@ -22,6 +22,7 @@ use crate::{
     events::download_events::{DOWNLOAD_ERROR, DOWNLOAD_PROGRESS, DOWNLOAD_STATUS},
     platform::binaries::{resolve_ffmpeg, resolve_yt_dlp},
     platform::spawn::hide_console_window,
+    downloader::sites::is_site,
     downloader::yt_dlp::{
         apply_cookie_source, apply_proxy, cookie_path_for_log, normalize_yt_dlp_error,
     },
@@ -340,7 +341,7 @@ fn run_download_task(
     let site_dir = site_target_dir(&download_dir, &url);
     fs::create_dir_all(&site_dir).map_err(|err| format!("创建下载目录失败：{err}"))?;
 
-    if url.contains("x.com") {
+    if is_site(&url, "x.com") {
         if let Some(selection) = format_id.as_deref().and_then(extract_ssstwitter_selection) {
             log::info!(
                 "[run_download_task] task_id={task_id} using ssstwitter selection label={} direct_url_present={}",
@@ -1238,7 +1239,7 @@ fn apply_download_progress_args(command: &mut Command) {
 }
 
 fn requires_binary_toolchain(url: &str, format_id: Option<&str>) -> bool {
-    !(url.contains("x.com")
+    !(is_site(url, "x.com")
         && format_id
             .and_then(extract_ssstwitter_selection)
             .is_some())

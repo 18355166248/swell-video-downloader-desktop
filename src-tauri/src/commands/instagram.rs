@@ -5,12 +5,13 @@ use std::process::{Command, Stdio};
 use crate::commands::instagram_types::{
     CollectInstagramTargetsRequest, CollectInstagramTargetsResponse,
 };
+use crate::downloader::sites::is_site;
 use crate::platform::spawn::hide_console_window;
 
 pub fn validate_collect_request(
     request: &CollectInstagramTargetsRequest,
 ) -> Result<(), String> {
-    if !request.url.contains("instagram.com") {
+    if !is_site(&request.url, "instagram.com") {
         return Err("仅支持 Instagram 链接".into());
     }
 
@@ -176,6 +177,34 @@ mod tests {
 
         let error = validate_collect_request(&request).expect_err("should reject host");
         assert!(error.contains("Instagram"));
+    }
+
+    #[test]
+    fn rejects_a_host_that_only_contains_the_instagram_name() {
+        let request = CollectInstagramTargetsRequest {
+            url: "https://instagram.com.evil.example/p/abc/".into(),
+            mode: InstagramCollectMode::Single,
+            count: 1,
+            sessionid: None,
+            cookie_file_path: None,
+        };
+
+        let error = validate_collect_request(&request)
+            .expect_err("a look-alike host should be rejected");
+        assert!(error.contains("Instagram"));
+    }
+
+    #[test]
+    fn accepts_an_instagram_subdomain() {
+        let request = CollectInstagramTargetsRequest {
+            url: "https://www.instagram.com/reels/DZxVqbsTzqZ/".into(),
+            mode: InstagramCollectMode::Single,
+            count: 1,
+            sessionid: None,
+            cookie_file_path: None,
+        };
+
+        assert!(validate_collect_request(&request).is_ok());
     }
 
     #[test]

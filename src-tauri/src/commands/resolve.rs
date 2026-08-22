@@ -2,6 +2,7 @@ use crate::downloader::page_title::fetch_page_title;
 use crate::downloader::yt_dlp::{
     fetch_metadata, probe_metadata, summarize_formats, DiagnosticCommandPreview, FormatSummary,
 };
+use crate::downloader::sites::detect_site;
 use crate::downloader::x_probe::probe_x_guest_restriction;
 use crate::downloader::x_ssstwitter::{create_ssstwitter_selection_id, resolve_x_via_ssstwitter};
 use crate::platform::binaries::resolve_ffmpeg;
@@ -118,16 +119,19 @@ fn resolve_media_blocking(
                         size_bytes: format.size_bytes,
                     })
                     .collect::<Vec<_>>();
-                let recommendation = formats.first().cloned().unwrap();
 
-                return Ok(ResolveMediaResponse {
-                    title: pick_best_title(None, html_title.as_deref(), &url, &source),
-                    source,
-                    duration_text: "--:--".into(),
-                    recommendation,
-                    formats,
-                    thumbnail: None,
-                });
+                // An empty list means ssstwitter answered but had nothing to offer;
+                // fall through to the guest-restriction probe for a better message.
+                if let Some(recommendation) = formats.first().cloned() {
+                    return Ok(ResolveMediaResponse {
+                        title: pick_best_title(None, html_title.as_deref(), &url, &source),
+                        source,
+                        duration_text: "--:--".into(),
+                        recommendation,
+                        formats,
+                        thumbnail: None,
+                    });
+                }
             }
 
             if let Ok(Some(restriction)) = probe_x_guest_restriction(&url) {
@@ -244,19 +248,9 @@ fn diagnose_media_blocking(
 }
 
 fn resolve_source(url: &str) -> Result<String, String> {
-    if url.contains("instagram.com") {
-        return Ok("instagram.com".to_string());
-    }
-
-    if url.contains("x.com") {
-        return Ok("x.com".to_string());
-    }
-
-    if url.contains("pornhub.com") {
-        return Ok("pornhub.com".to_string());
-    }
-
-    Err("仅支持 x.com、pornhub.com 和 instagram.com".into())
+    detect_site(url)
+        .map(str::to_string)
+        .ok_or_else(|| "仅支持 x.com、pornhub.com 和 instagram.com".to_string())
 }
 
 fn build_resolve_response(
