@@ -470,6 +470,23 @@ pub fn summarize_formats(best_format_id: &str, formats: &[YtDlpFormat]) -> Forma
     summary
 }
 
+/// How a cookies.txt path is written to the log: the file name only. The path is a
+/// pointer to live session cookies and on Windows contains the user name, and the
+/// log file is the thing users attach to bug reports. The full path is still logged
+/// on the "file not found" error path, where it is what the user needs to fix.
+pub fn cookie_path_for_log(cookie_file_path: Option<&str>) -> String {
+    match cookie_file_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "cookies".into()),
+        None => "none".into(),
+    }
+}
+
 fn cookie_args(
     cookie_source: Option<&str>,
     cookie_file_path: Option<&str>,
@@ -487,7 +504,10 @@ fn cookie_args(
             return Err("cookies.txt 文件不存在，请确认路径后重试。".into());
         }
 
-        log::info!("[cookie_args] using explicit cookies.txt: {path}");
+        log::info!(
+            "[cookie_args] using explicit cookies.txt: {}",
+            cookie_path_for_log(Some(path))
+        );
         return Ok(vec!["--cookies".into(), path.to_string()]);
     }
 
@@ -548,8 +568,8 @@ fn powershell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cookie_source, build_metadata_probe, classify_yt_dlp_error, summarize_formats,
-        YtDlpFormat,
+        apply_cookie_source, build_metadata_probe, classify_yt_dlp_error, cookie_path_for_log,
+        summarize_formats, YtDlpFormat,
     };
     use std::{env, fs, process::Command};
 
@@ -709,4 +729,15 @@ mod tests {
         assert!(summary.has_video_only_format);
         assert!(summary.has_audio_only_format);
     }
+
+    #[test]
+    fn cookie_path_logs_file_name_only() {
+        assert_eq!(
+            cookie_path_for_log(Some(r"C:\Users\alice\Desktop\ig-cookies.txt")),
+            "ig-cookies.txt"
+        );
+        assert_eq!(cookie_path_for_log(Some("  ")), "none");
+        assert_eq!(cookie_path_for_log(None), "none");
+    }
+
 }

@@ -46,11 +46,16 @@ export function hasActiveDownloadForFormat(
   return state.current.some((row) => rowDownloadKey(row) === key && isActiveStatus(row.status));
 }
 
+// Keeps the array reference when nothing needs trimming. Every state update runs
+// through here, so slicing unconditionally would hand back a fresh `history` array
+// on each progress tick — invalidating memoized consumers and re-serializing the
+// whole history to localStorage several times a second during a download.
 export function pruneDownloadHistory(
   history: DownloadRow[],
   limit = DOWNLOAD_HISTORY_LIMIT,
 ): DownloadRow[] {
-  return history.slice(0, Math.max(0, limit));
+  const max = Math.max(0, limit);
+  return history.length <= max ? history : history.slice(0, max);
 }
 
 export function mergeRowsById(primary: DownloadRow[], secondary: DownloadRow[]): DownloadRow[] {

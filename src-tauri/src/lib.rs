@@ -68,6 +68,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             init_logging(&app.handle());
+            // Clear `.part` files a previous run never got to clean up.
+            commands::download::sweep_stale_staging_files(&app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

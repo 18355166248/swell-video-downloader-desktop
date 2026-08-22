@@ -253,4 +253,33 @@ assert.equal(pruned.length, DOWNLOAD_HISTORY_LIMIT);
 assert.equal(pruned[0].id, 'history-0');
 assert.equal(pruned.at(-1).id, `history-${DOWNLOAD_HISTORY_LIMIT - 1}`);
 
+// A history that fits under the limit must come back as the very same array, so a
+// progress tick on an active download doesn't churn the history reference.
+const withinLimit = oversizedHistory.slice(0, 3);
+assert.equal(pruneDownloadHistory(withinLimit), withinLimit);
+
+const activeDownloadState = {
+  current: [
+    {
+      id: 'task-progress-identity',
+      title: '下载中',
+      status: 'downloading',
+      progress: '10%',
+      sourceUrl: 'https://x.com/u/status/9',
+      formatId: 'best',
+    },
+  ],
+  history: withinLimit,
+};
+const afterProgress = updateDownloadProgress(activeDownloadState, {
+  taskId: 'task-progress-identity',
+  percent: '11%',
+  speed: '1 MiB/s',
+});
+assert.equal(afterProgress.history, activeDownloadState.history);
+assert.equal(afterProgress.current[0].progress, '11%');
+
+const afterArchive = archiveFinishedRows(afterProgress);
+assert.equal(afterArchive.history, activeDownloadState.history);
+
 fs.rmSync(tempModulePath, { force: true });

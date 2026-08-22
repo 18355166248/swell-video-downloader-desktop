@@ -22,7 +22,9 @@ use crate::{
     events::download_events::{DOWNLOAD_ERROR, DOWNLOAD_PROGRESS, DOWNLOAD_STATUS},
     platform::binaries::{resolve_ffmpeg, resolve_yt_dlp},
     platform::spawn::hide_console_window,
-    downloader::yt_dlp::{apply_cookie_source, apply_proxy, normalize_yt_dlp_error},
+    downloader::yt_dlp::{
+        apply_cookie_source, apply_proxy, cookie_path_for_log, normalize_yt_dlp_error,
+    },
 };
 
 static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -145,7 +147,9 @@ pub struct DownloadDirectorySettings {
     pub is_custom: bool,
 }
 
-#[tauri::command]
+// Runs off the main thread: it reads the config file and creates directories, and
+// a 50-item batch would otherwise queue that I/O in front of the UI.
+#[tauri::command(async)]
 pub fn start_download(
     app: AppHandle,
     url: String,
@@ -155,11 +159,11 @@ pub fn start_download(
     cookie_file_path: Option<String>,
 ) -> Result<String, String> {
     log::info!(
-        "[start_download] url={url} format_id={:?} title={:?} cookie_source={:?} cookie_file_path={:?} requires_binary_toolchain={}",
+        "[start_download] url={url} format_id={:?} title={:?} cookie_source={:?} cookie_file={} requires_binary_toolchain={}",
         format_id,
         title,
         cookie_source,
-        cookie_file_path,
+        cookie_path_for_log(cookie_file_path.as_deref()),
         requires_binary_toolchain(&url, format_id.as_deref())
     );
     if url.trim().is_empty() {
@@ -243,7 +247,7 @@ pub fn start_download(
     Ok(return_task_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_download(app: AppHandle, task_id: String) -> Result<(), String> {
     let control = {
         let tasks = download_tasks()
@@ -405,7 +409,11 @@ fn run_download_task(
     }
 
     apply_proxy(&mut command);
-    log::info!("[run_download_task] task_id={task_id} cookie_source={:?} cookie_file_path={:?}", cookie_source, cookie_file_path);
+    log::info!(
+        "[run_download_task] task_id={task_id} cookie_source={:?} cookie_file={}",
+        cookie_source,
+        cookie_path_for_log(cookie_file_path.as_deref())
+    );
     apply_cookie_source(
         &mut command,
         cookie_source.as_deref(),
@@ -421,14 +429,11 @@ fn run_download_task(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    // Log the full command for debugging (mask cookie values for security).
+    // Log the full command for debugging, with the cookies.txt path reduced to its
+    // file name so a shared log file doesn't carry the user's home directory.
     log::info!(
         "[run_download_task] task_id={task_id} yt-dlp args: {:?}",
-        command.get_args().collect::<Vec<_>>().iter().map(|a| {
-            let s = a.to_string_lossy().to_string();
-            // Mask sessionid-like values in cookies file paths
-            if s.contains("sessionid") || s.contains("cookie") { s } else { s }
-        }).collect::<Vec<_>>()
+        masked_command_args(&command)
     );
 
     let mut child = command
@@ -707,6 +712,8 @@ pub fn reset_download_dir(app: AppHandle) -> Result<String, String> {
 /// opener scope in capabilities (`$DOWNLOAD/**`) must cover this for "打开下载目录".
 const DOWNLOAD_SUBDIR: &str = "video-downloader";
 const INCOMPLETE_SUBDIR: &str = "incomplete";
+/// A `.part` file untouched for this long can't belong to a live download.
+const STALE_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
 
 fn resolve_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let default_dir = default_download_dir(app)?;
@@ -825,10 +832,18 @@ fn run_ssstwitter_download_task(
 
     let result = match result {
         Ok(result) => result,
-        Err(error) => return Err(error),
+        // Cancel or transfer failure: drop the half-written staging file instead of
+        // leaving it behind — nothing ever resumes from it, so it is pure garbage.
+        Err(error) => {
+            discard_staging_file(&staging_path);
+            return Err(error);
+        }
     };
 
-    move_into_place(&staging_path, &output_path)?;
+    if let Err(error) = move_into_place(&staging_path, &output_path) {
+        discard_staging_file(&staging_path);
+        return Err(error);
+    }
 
     let overall_bps = transfer_started_at
         .map(|started| result.downloaded_bytes as f64 / started.elapsed().as_secs_f64().max(0.001))
@@ -867,6 +882,63 @@ fn staging_path_for(download_dir: &Path, task_id: &str) -> PathBuf {
     download_dir
         .join(INCOMPLETE_SUBDIR)
         .join(format!("{task_id}.part"))
+}
+
+/// Delete an abandoned staging file (and its `incomplete` folder when that leaves
+/// it empty). Best-effort: a failure here must never mask the real error.
+fn discard_staging_file(staging_path: &Path) {
+    if fs::remove_file(staging_path).is_err() {
+        return;
+    }
+    if let Some(parent) = staging_path.parent() {
+        if parent.file_name().and_then(|name| name.to_str()) == Some(INCOMPLETE_SUBDIR) {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+}
+
+/// Sweep `.part` files left over from a previous run (a crash or a kill that never
+/// reached the cleanup path). Called once at startup, and only for files older than
+/// [`STALE_STAGING_AGE`], so a second app instance can't delete a live download.
+pub fn sweep_stale_staging_files(app: &AppHandle) {
+    let Ok(base_dir) = resolve_download_dir(app) else {
+        return;
+    };
+    let Ok(site_dirs) = fs::read_dir(&base_dir) else {
+        return;
+    };
+
+    let mut removed = 0usize;
+    for site_dir in site_dirs.flatten() {
+        let incomplete_dir = site_dir.path().join(INCOMPLETE_SUBDIR);
+        let Ok(entries) = fs::read_dir(&incomplete_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("part") {
+                continue;
+            }
+            let is_stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .map(|modified| {
+                    modified
+                        .elapsed()
+                        .map(|age| age >= STALE_STAGING_AGE)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if is_stale && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        let _ = fs::remove_dir(&incomplete_dir);
+    }
+
+    if removed > 0 {
+        log::info!("[sweep_stale_staging_files] removed {removed} stale .part file(s)");
+    }
 }
 
 /// Move the finished staging file to its destination. A same-volume rename is an
@@ -1117,6 +1189,31 @@ fn direct_download_url(format_id: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Render a command's args for logging. The value after `--cookies` is a path to a
+/// live cookie jar, and on Windows it embeds the user name, so only the file name
+/// is kept — enough to tell "which cookies.txt" apart without leaking the path.
+fn masked_command_args(command: &Command) -> Vec<String> {
+    let mut rendered = Vec::new();
+    let mut mask_next = false;
+
+    for arg in command.get_args() {
+        let value = arg.to_string_lossy().to_string();
+        if mask_next {
+            let file_name = Path::new(&value)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "cookies".into());
+            rendered.push(format!("<cookies:{file_name}>"));
+            mask_next = false;
+            continue;
+        }
+        mask_next = value == "--cookies";
+        rendered.push(value);
+    }
+
+    rendered
+}
+
 fn apply_download_progress_args(command: &mut Command) {
     command.arg("--progress");
     command.arg("--newline");
@@ -1231,10 +1328,11 @@ fn sanitize_filename(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_download_progress_args,
+        apply_cookie_source, apply_download_progress_args,
         category_dir, category_folder, clean_format_descriptor, compose_download_title,
-        decode_secret, direct_download_url, download_task_key, effective_download_dir,
-        encode_secret, extract_ssstwitter_selection, find_existing_completed_download, format_eta,
+        decode_secret, direct_download_url, discard_staging_file, download_task_key,
+        effective_download_dir, encode_secret, extract_ssstwitter_selection,
+        find_existing_completed_download, format_eta, masked_command_args,
         normalize_download_concurrency, normalize_optional, register_download_task,
         requires_binary_toolchain, sanitize_filename, site_folder, site_target_dir,
         staging_path_for, unregister_download_task, with_ssstwitter_download_slot,
@@ -1548,4 +1646,64 @@ mod tests {
             "ssstwitter downloads should be governed by the global download limit, not a single slot"
         );
     }
+
+    #[test]
+    fn logged_args_keep_only_the_cookie_file_name() {
+        let cookies_path = env::temp_dir().join("swell-cookies-fixture.txt");
+        fs::write(&cookies_path, "# Netscape HTTP Cookie File")
+            .expect("cookie fixture should be writable");
+
+        let mut command = Command::new("yt-dlp");
+        command.arg("--newline");
+        apply_cookie_source(&mut command, Some("import"), cookies_path.to_str())
+            .expect("explicit cookies.txt should be accepted");
+        command.arg("https://example.com/video");
+
+        let rendered = masked_command_args(&command);
+
+        assert!(rendered.contains(&"--cookies".to_string()));
+        assert!(rendered.contains(&"<cookies:swell-cookies-fixture.txt>".to_string()));
+        assert!(
+            !rendered
+                .iter()
+                .any(|arg| arg.contains(&cookies_path.display().to_string())),
+            "the full cookies.txt path must never reach the log"
+        );
+
+        let _ = fs::remove_file(&cookies_path);
+    }
+
+    #[test]
+    fn browser_cookie_source_is_logged_unmasked() {
+        let mut command = Command::new("yt-dlp");
+        apply_cookie_source(&mut command, Some("chrome"), None)
+            .expect("chrome cookie source should be accepted");
+
+        let rendered = masked_command_args(&command);
+
+        assert_eq!(rendered, vec!["--cookies-from-browser", "chrome"]);
+    }
+
+    #[test]
+    fn discarding_a_staging_file_also_drops_its_empty_folder() {
+        let site_dir = env::temp_dir().join(format!("swell-staging-test-{}", std::process::id()));
+        let staging_path = staging_path_for(&site_dir, "task-1");
+        fs::create_dir_all(staging_path.parent().expect("path should have parent"))
+            .expect("staging directory should be writable");
+        fs::write(&staging_path, "partial bytes").expect("staging fixture should be writable");
+
+        discard_staging_file(&staging_path);
+
+        assert!(!staging_path.exists(), "the .part file should be removed");
+        assert!(
+            !staging_path
+                .parent()
+                .expect("path should have parent")
+                .exists(),
+            "the emptied incomplete folder should be removed too"
+        );
+
+        let _ = fs::remove_dir_all(&site_dir);
+    }
+
 }
