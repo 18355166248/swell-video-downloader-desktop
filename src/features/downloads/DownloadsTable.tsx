@@ -27,6 +27,10 @@ type DownloadsTableProps = {
   selectable?: boolean;
   selectedIds?: Set<string>;
   onSelectionChange?: (ids: Set<string>) => void;
+  /** When provided, each row gets its own retry button (no selection needed). */
+  onRetry?: (row: DownloadRow) => void;
+  /** Row ids whose retry request is still in flight. */
+  retryingIds?: Set<string>;
 };
 
 function formatStatus(status: string): string {
@@ -73,6 +77,12 @@ function canCancel(status: string) {
   return ['queued', 'downloading', 'postprocessing', 'canceling'].includes(status);
 }
 
+// Only finished-but-unsuccessful rows can be re-queued, and only if the source
+// url survived (rows restored from an old history file may lack it).
+export function canRetry(row: DownloadRow): boolean {
+  return Boolean(row.sourceUrl) && ['failed', 'canceled'].includes(row.status);
+}
+
 // "93.5%" / "0%" → clamped number for the bar width; defaults to 0 when unknown.
 function progressPercent(progress: string, status: string): number {
   if (status === 'completed') {
@@ -96,6 +106,8 @@ export function DownloadsTable({
   selectable,
   selectedIds,
   onSelectionChange,
+  onRetry,
+  retryingIds,
 }: DownloadsTableProps) {
   const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const [page, setPage] = useState(0);
@@ -195,6 +207,17 @@ export function DownloadsTable({
             </div>
 
             <div className="dl-actions">
+              {onRetry && canRetry(row) ? (
+                <button
+                  type="button"
+                  className="dl-retry-btn"
+                  aria-label={`重试下载：${row.title}`}
+                  disabled={retryingIds?.has(row.id) ?? false}
+                  onClick={() => onRetry(row)}
+                >
+                  {retryingIds?.has(row.id) ? '重试中…' : '重试'}
+                </button>
+              ) : null}
               <ActionButton
                 aria-label={row.outputPath ? '打开所在文件夹' : '打开下载目录'}
                 onPress={() => onOpenLocation(row)}

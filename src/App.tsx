@@ -17,7 +17,7 @@ import {
   upsertCurrentDownloadRow,
   type DownloadBucketState,
 } from './features/downloads/download-state';
-import { DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
+import { canRetry, DownloadsTable, type DownloadRow } from './features/downloads/DownloadsTable';
 import { DiagnosticPanel } from './features/resolve/DiagnosticPanel';
 import { ResolveBoard, type ResolveItem } from './features/resolve/ResolveBoard';
 import { ResolvePanel } from './features/resolve/ResolvePanel';
@@ -64,6 +64,12 @@ import type {
 } from './lib/types';
 
 type DownloadTab = 'current' | 'history' | 'retry';
+
+// Result of re-queueing one row: queued, skipped as a duplicate, or rejected.
+type RetryOutcome =
+  | { status: 'ok' }
+  | { status: 'skipped' }
+  | { status: 'error'; message: string };
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
@@ -281,6 +287,8 @@ export default function App() {
   });
   const [downloadTab, setDownloadTab] = useState<DownloadTab>('current');
   const [selectedRetryIds, setSelectedRetryIds] = useState<Set<string>>(new Set());
+  // Row ids with a retry request in flight, so their button can't be double-fired.
+  const [retryingRowIds, setRetryingRowIds] = useState<Set<string>>(new Set());
   const [downloadDir, setDownloadDirState] = useState('');
   const [downloadDirectorySettings, setDownloadDirectorySettings] =
     useState<DownloadDirectorySettings | null>(null);
@@ -472,6 +480,23 @@ export default function App() {
       JSON.stringify(pruneDownloadHistory(downloadState.history)),
     );
   }, [downloadState.history]);
+
+  // Rows leave the retry list once they are re-queued or deleted. Drop their ids
+  // from the selection too, so "批量重试（N）" can't count rows that are gone.
+  useEffect(() => {
+    setSelectedRetryIds((current) => {
+      if (current.size === 0) {
+        return current;
+      }
+      const next = new Set<string>();
+      for (const row of mergeRowsById(downloadState.current, downloadState.history)) {
+        if (current.has(row.id) && canRetry(row)) {
+          next.add(row.id);
+        }
+      }
+      return next.size === current.size ? current : next;
+    });
+  }, [downloadState.current, downloadState.history]);
 
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
@@ -1035,6 +1060,74 @@ export default function App() {
     }
   }
 
+  // Re-queue one failed/canceled row. Shared by the per-row retry button and
+  // the batch action so both paths behave identically.
+  async function retryDownloadRow(row: DownloadRow): Promise<RetryOutcome> {
+    if (!row.sourceUrl) {
+      return { status: 'skipped' };
+    }
+    const downloadKey = createDownloadKey(row.sourceUrl, row.formatId);
+    if (
+      activeDownloadKeys.current.has(downloadKey) ||
+      hasActiveDownloadForFormat(downloadState, row.sourceUrl, row.formatId)
+    ) {
+      return { status: 'skipped' };
+    }
+    activeDownloadKeys.current.add(downloadKey);
+    try {
+      const taskId = await startDownload(
+        row.sourceUrl,
+        row.formatId ?? null,
+        row.title,
+        selectedCookieSource,
+        instagramBridgeCookiePath || cookieFilePath,
+      );
+      registerActiveDownloadKey(taskId, downloadKey);
+      setDownloadState((current) =>
+        upsertCurrentDownloadRow(current, {
+          id: taskId,
+          title: row.title,
+          sessionLabel: row.sessionLabel,
+          status: 'queued',
+          progress: '0%',
+          sourceUrl: row.sourceUrl,
+          formatId: row.formatId,
+        }),
+      );
+      return { status: 'ok' };
+    } catch (err) {
+      activeDownloadKeys.current.delete(downloadKey);
+      return { status: 'error', message: getTauriErrorMessage(err, '重试失败') };
+    }
+  }
+
+  // Retry a single row straight from its own button — no selection required.
+  async function handleRetryRow(row: DownloadRow) {
+    if (retryingRowIds.has(row.id)) {
+      return;
+    }
+    setRetryingRowIds((current) => new Set(current).add(row.id));
+    try {
+      const result = await retryDownloadRow(row);
+      if (result.status === 'ok') {
+        // Stay on the current tab: the row leaves the retry list on its own (and
+        // the pruning effect drops its id from the selection), so the user can
+        // keep retrying others one by one without being bounced away.
+        pushToast(`已重新加入下载队列：${summarizeTitle(row.title)}`, 'success');
+      } else if (result.status === 'skipped') {
+        pushToast('这个视频版本已经在下载队列中。', 'info');
+      } else {
+        reportError(`${summarizeTitle(row.title)} 重试失败：${result.message}`);
+      }
+    } finally {
+      setRetryingRowIds((current) => {
+        const next = new Set(current);
+        next.delete(row.id);
+        return next;
+      });
+    }
+  }
+
   async function handleBatchRetry() {
     const retryable = [...downloadState.current, ...downloadState.history].filter(
       (row) => selectedRetryIds.has(row.id) && row.sourceUrl,
@@ -1046,38 +1139,11 @@ export default function App() {
     let ok = 0;
     const failures: string[] = [];
     for (const row of retryable) {
-      const downloadKey = createDownloadKey(row.sourceUrl!, row.formatId);
-      if (
-        activeDownloadKeys.current.has(downloadKey) ||
-        hasActiveDownloadForFormat(downloadState, row.sourceUrl!, row.formatId)
-      ) {
-        continue;
-      }
-      activeDownloadKeys.current.add(downloadKey);
-      try {
-        const taskId = await startDownload(
-          row.sourceUrl!,
-          row.formatId ?? null,
-          row.title,
-          selectedCookieSource,
-          instagramBridgeCookiePath || cookieFilePath,
-        );
-        registerActiveDownloadKey(taskId, downloadKey);
-        setDownloadState((current) =>
-          upsertCurrentDownloadRow(current, {
-            id: taskId,
-            title: row.title,
-            sessionLabel: row.sessionLabel,
-            status: 'queued',
-            progress: '0%',
-            sourceUrl: row.sourceUrl,
-            formatId: row.formatId,
-          }),
-        );
+      const result = await retryDownloadRow(row);
+      if (result.status === 'ok') {
         ok += 1;
-      } catch (err) {
-        activeDownloadKeys.current.delete(downloadKey);
-        failures.push(`${summarizeTitle(row.title)}: ${getTauriErrorMessage(err, '重试失败')}`);
+      } else if (result.status === 'error') {
+        failures.push(`${summarizeTitle(row.title)}: ${result.message}`);
       }
     }
 
@@ -1332,7 +1398,7 @@ export default function App() {
             </button>
             {(() => {
               const retryCount = mergeRowsById(downloadState.current, downloadState.history)
-                .filter((r) => ['failed', 'canceled'].includes(r.status) && r.sourceUrl).length;
+                .filter(canRetry).length;
               return (
                 <button
                   type="button"
@@ -1365,11 +1431,13 @@ export default function App() {
               rows={downloadState.history}
               onOpenLocation={handleOpenLocation}
               onDelete={handleDeleteHistoryRow}
+              onRetry={(row) => void handleRetryRow(row)}
+              retryingIds={retryingRowIds}
             />
           ) : (
             (() => {
               const retryableRows = mergeRowsById(downloadState.current, downloadState.history)
-                .filter((r) => ['failed', 'canceled'].includes(r.status) && r.sourceUrl);
+                .filter(canRetry);
               return (
                 <>
                   <DownloadsTable
@@ -1382,6 +1450,8 @@ export default function App() {
                     selectable
                     selectedIds={selectedRetryIds}
                     onSelectionChange={setSelectedRetryIds}
+                    onRetry={(row) => void handleRetryRow(row)}
+                    retryingIds={retryingRowIds}
                   />
                   {retryableRows.length > 0 ? (
                     <div className="dl-batch-retry">
