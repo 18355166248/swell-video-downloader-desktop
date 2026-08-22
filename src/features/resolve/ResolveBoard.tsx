@@ -1,6 +1,7 @@
 import { ActionButton, Button, ProgressCircle, Text } from '@react-spectrum/s2';
-import { useEffect, useRef, useState, type UIEvent } from 'react';
+import { memo, useEffect, useRef, useState, type UIEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { createDownloadKey } from '../downloads/download-state';
 import { lockAppScroll } from '../../lib/scroll-lock';
 import type { MediaFormat, ResolveMediaResponse } from '../../lib/types';
 
@@ -19,7 +20,8 @@ export type ResolveItem = {
 type ResolveBoardProps = {
   items: ResolveItem[];
   openUrl: string | null;
-  downloadingIdsFor: (url: string) => ReadonlySet<string>;
+  /** Keys (`url::formatId`) of downloads currently being handed to the backend. */
+  downloadingIds: ReadonlySet<string>;
   onOpenChange: (url: string | null) => void;
   onDownload: (item: ResolveItem, format: MediaFormat) => void;
 };
@@ -70,10 +72,10 @@ function badgeText(item: ResolveItem): string {
   return STATUS_TEXT[item.status];
 }
 
-export function ResolveBoard({
+function ResolveBoardView({
   items,
   openUrl,
-  downloadingIdsFor,
+  downloadingIds,
   onOpenChange,
   onDownload,
 }: ResolveBoardProps) {
@@ -282,29 +284,32 @@ export function ResolveBoard({
 
                   <Text UNSAFE_className="format-list-title">选择要下载的版本</Text>
                   <ul className="format-list">
-                    {openItem.resolved.formats.map((format) => (
-                      <li
-                        key={format.id}
-                        className={`format-row${
-                          downloadingIdsFor(openItem.url).has(format.id) ? ' is-submitting' : ''
-                        }`}
-                      >
-                        <div className="format-info">
-                          <Text UNSAFE_className="format-label">{format.label}</Text>
-                          <Text UNSAFE_className="format-sub">
-                            {format.ext.toUpperCase()} · {formatBytes(format.sizeBytes)}
-                            {format.hasAudio ? ' · 含音轨' : ' · 无音轨'}
-                          </Text>
-                        </div>
-                        <Button
-                          variant="accent"
-                          onPress={() => onDownload(openItem, format)}
-                          isPending={downloadingIdsFor(openItem.url).has(format.id)}
+                    {openItem.resolved.formats.map((format) => {
+                      const isSubmitting = downloadingIds.has(
+                        createDownloadKey(openItem.url, format.id),
+                      );
+                      return (
+                        <li
+                          key={format.id}
+                          className={`format-row${isSubmitting ? ' is-submitting' : ''}`}
                         >
-                          {downloadingIdsFor(openItem.url).has(format.id) ? '加入中…' : '下载'}
-                        </Button>
-                      </li>
-                    ))}
+                          <div className="format-info">
+                            <Text UNSAFE_className="format-label">{format.label}</Text>
+                            <Text UNSAFE_className="format-sub">
+                              {format.ext.toUpperCase()} · {formatBytes(format.sizeBytes)}
+                              {format.hasAudio ? ' · 含音轨' : ' · 无音轨'}
+                            </Text>
+                          </div>
+                          <Button
+                            variant="accent"
+                            onPress={() => onDownload(openItem, format)}
+                            isPending={isSubmitting}
+                          >
+                            {isSubmitting ? '加入中…' : '下载'}
+                          </Button>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </>
               ) : null}
@@ -317,3 +322,7 @@ export function ResolveBoard({
     </>
   );
 }
+
+// Renders up to a page of cards plus the format drawer; without memo every
+// download progress tick in the parent would re-render all of it.
+export const ResolveBoard = memo(ResolveBoardView);

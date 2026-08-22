@@ -1,5 +1,5 @@
 import { ActionButton } from '@react-spectrum/s2';
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 
 const PAGE_SIZE = 6;
 
@@ -95,7 +95,7 @@ function progressPercent(progress: string, status: string): number {
   return Math.max(0, Math.min(100, value));
 }
 
-export function DownloadsTable({
+function DownloadsTableView({
   mode,
   rows,
   onOpenLocation,
@@ -266,3 +266,8 @@ export function DownloadsTable({
     </>
   );
 }
+
+// The download tabs re-render on every progress tick; memo keeps the tables that
+// aren't showing (and the resolve-side ones) out of that work. All callbacks are
+// passed with stable identities, so the comparison comes down to the row arrays.
+export const DownloadsTable = memo(DownloadsTableView);

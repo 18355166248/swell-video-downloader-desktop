@@ -1,5 +1,5 @@
 import { Button, InlineAlert, Text } from '@react-spectrum/s2';
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { ToastStack, type ToastItem } from './components/ToastStack';
 import {
@@ -27,8 +27,11 @@ import {
   listenDownloadError,
   listenDownloadProgress,
   listenDownloadStatus,
+  type DownloadProgressPayload,
 } from './lib/download-events';
 import { mapWithConcurrency } from './lib/async-pool';
+import { createProgressBuffer, type ProgressBuffer } from './lib/progress-buffer';
+import { useEventCallback } from './lib/use-event-callback';
 import {
   DEFAULT_DOWNLOAD_CONCURRENCY,
   normalizeDownloadConcurrency,
@@ -73,6 +76,10 @@ type RetryOutcome =
 
 const DOWNLOAD_HISTORY_STORAGE_KEY = 'swell.downloadHistory.v1';
 const TOAST_LIMIT = 4;
+// yt-dlp reports progress far faster than anyone can read it. Ticks are collected
+// and applied on this interval — one state update for the whole batch instead of
+// one per line, with only the latest tick per task surviving.
+const PROGRESS_FLUSH_MS = 200;
 
 const HERO_STEPS = [
   { id: 1, label: '解析地址' },
@@ -325,6 +332,15 @@ export default function App() {
   // Task ids the user removed from the list — late progress/status events for
   // these are ignored so a deleted row never re-appears.
   const dismissedDownloadIds = useRef<Set<string>>(new Set());
+  // Progress ticks are collected here and applied in batches; see PROGRESS_FLUSH_MS.
+  const progressBufferRef = useRef<ProgressBuffer<DownloadProgressPayload> | null>(null);
+  if (progressBufferRef.current === null) {
+    progressBufferRef.current = createProgressBuffer<DownloadProgressPayload>(
+      PROGRESS_FLUSH_MS,
+      applyProgressBatch,
+    );
+  }
+  const progressBuffer = progressBufferRef.current;
   // Monotonic token identifying the active resolve run. Bumping it cancels the
   // in-flight run: stale awaits see a mismatch and bail without touching state.
   const resolveSessionRef = useRef(0);
@@ -498,6 +514,8 @@ export default function App() {
     });
   }, [downloadState.current, downloadState.history]);
 
+  useEffect(() => () => progressBuffer.cancel(), [progressBuffer]);
+
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
 
@@ -506,13 +524,7 @@ export default function App() {
         if (dismissedDownloadIds.current.has(payload.task_id)) {
           return;
         }
-        setDownloadState((current) =>
-          updateDownloadProgress(current, {
-            taskId: payload.task_id,
-            percent: payload.percent,
-            speed: payload.speed,
-          }),
-        );
+        progressBuffer.push(payload);
       }),
       listenDownloadStatus((payload) => {
         if (dismissedDownloadIds.current.has(payload.task_id)) {
@@ -542,6 +554,9 @@ export default function App() {
           payload.status === 'canceled'
         ) {
           releaseActiveDownloadKey(payload.task_id);
+          // A buffered tick is older than this status; applying it afterwards would
+          // drag a finished row's percentage back down.
+          progressBuffer.drop(payload.task_id);
         }
 
         setDownloadState((current) =>
@@ -580,23 +595,29 @@ export default function App() {
     };
   }, []);
 
+  // One state update for a whole flush window instead of one per reported line.
+  function applyProgressBatch(batch: DownloadProgressPayload[]) {
+    const live = batch.filter((payload) => !dismissedDownloadIds.current.has(payload.task_id));
+    if (live.length === 0) {
+      return;
+    }
+    setDownloadState((current) =>
+      live.reduce(
+        (state, payload) =>
+          updateDownloadProgress(state, {
+            taskId: payload.task_id,
+            percent: payload.percent,
+            speed: payload.speed,
+          }),
+        current,
+      ),
+    );
+  }
+
   function patchResolvedItem(itemUrl: string, patch: Partial<ResolveItem>) {
     setResolvedItems((items) =>
       items.map((item) => (item.url === itemUrl ? { ...item, ...patch } : item)),
     );
-  }
-
-  // Format ids are only unique within one video, so downloads are tracked under
-  // a `url::formatId` key. Each card gets the bare ids scoped to its own url.
-  function scopedDownloadingIds(itemUrl: string): Set<string> {
-    const prefix = `${itemUrl}::`;
-    const scoped = new Set<string>();
-    for (const key of downloadingIds) {
-      if (key.startsWith(prefix)) {
-        scoped.add(key.slice(prefix.length));
-      }
-    }
-    return scoped;
   }
 
   async function loadPreview(itemUrl: string, result: ResolveMediaResponse) {
@@ -1181,6 +1202,7 @@ export default function App() {
     downloadKeyByTaskId.current.delete(row.id);
     dismissedDownloadIds.current.add(row.id);
     notifiedDownloadIds.current.add(row.id);
+    progressBuffer.drop(row.id);
     setDownloadState((current) => removeCurrentRow(current, row.id));
     pushToast(`已移除：${summarizeTitle(row.title)}`, 'info');
   }
@@ -1243,6 +1265,30 @@ export default function App() {
       setIsSavingDownloadDirectory(false);
     }
   }
+
+  // Shared by the tab badge and the retry table; recomputed only when the queue or
+  // history actually changes, not on every render.
+  const retryableRows = useMemo(
+    () => mergeRowsById(downloadState.current, downloadState.history).filter(canRetry),
+    [downloadState.current, downloadState.history],
+  );
+  const selectedRetryCount = useMemo(
+    () => retryableRows.filter((row) => selectedRetryIds.has(row.id)).length,
+    [retryableRows, selectedRetryIds],
+  );
+
+  // Stable identities for everything handed to a memoized child, so a progress
+  // tick can't invalidate their props.
+  const onOpenLocation = useEventCallback((row: DownloadRow) => void handleOpenLocation(row));
+  const onCancelDownload = useEventCallback((row: DownloadRow) => void handleCancelDownload(row));
+  const onRemoveCurrentRow = useEventCallback(
+    (row: DownloadRow) => void handleRemoveCurrentRow(row),
+  );
+  const onDeleteHistoryRow = useEventCallback((row: DownloadRow) => handleDeleteHistoryRow(row));
+  const onRetryRow = useEventCallback((row: DownloadRow) => void handleRetryRow(row));
+  const onResolveDownload = useEventCallback(
+    (item: ResolveItem, format: MediaFormat) => void handleDownload(item, format),
+  );
 
   const activeStep = resolvedItems.length > 0
     ? 2
@@ -1355,9 +1401,9 @@ export default function App() {
             <ResolveBoard
               items={resolvedItems}
               openUrl={expandedUrl}
-              downloadingIdsFor={scopedDownloadingIds}
+              downloadingIds={downloadingIds}
               onOpenChange={setExpandedUrl}
-              onDownload={(item, format) => void handleDownload(item, format)}
+              onDownload={onResolveDownload}
             />
           </section>
         ) : null}
@@ -1396,21 +1442,15 @@ export default function App() {
             >
               历史记录
             </button>
-            {(() => {
-              const retryCount = mergeRowsById(downloadState.current, downloadState.history)
-                .filter(canRetry).length;
-              return (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={downloadTab === 'retry'}
-                  className={`download-tab${downloadTab === 'retry' ? ' is-active' : ''}`}
-                  onClick={() => setDownloadTab('retry')}
-                >
-                  失败重试{retryCount > 0 ? `（${retryCount}）` : ''}
-                </button>
-              );
-            })()}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={downloadTab === 'retry'}
+              className={`download-tab${downloadTab === 'retry' ? ' is-active' : ''}`}
+              onClick={() => setDownloadTab('retry')}
+            >
+              失败重试{retryableRows.length > 0 ? `（${retryableRows.length}）` : ''}
+            </button>
           </div>
 
           {downloadTab === 'current' ? (
@@ -1419,9 +1459,9 @@ export default function App() {
               ariaLabel="当前下载队列"
               emptyText="解析视频并选择清晰度后，下载任务会出现在这里。"
               rows={downloadState.current}
-              onOpenLocation={handleOpenLocation}
-              onCancel={handleCancelDownload}
-              onDelete={handleRemoveCurrentRow}
+              onOpenLocation={onOpenLocation}
+              onCancel={onCancelDownload}
+              onDelete={onRemoveCurrentRow}
             />
           ) : downloadTab === 'history' ? (
             <DownloadsTable
@@ -1429,45 +1469,39 @@ export default function App() {
               ariaLabel="下载历史"
               emptyText="还没有历史记录。完成或失败过的任务会出现在这里。"
               rows={downloadState.history}
-              onOpenLocation={handleOpenLocation}
-              onDelete={handleDeleteHistoryRow}
-              onRetry={(row) => void handleRetryRow(row)}
+              onOpenLocation={onOpenLocation}
+              onDelete={onDeleteHistoryRow}
+              onRetry={onRetryRow}
               retryingIds={retryingRowIds}
             />
           ) : (
-            (() => {
-              const retryableRows = mergeRowsById(downloadState.current, downloadState.history)
-                .filter(canRetry);
-              return (
-                <>
-                  <DownloadsTable
-                    mode="history"
-                    ariaLabel="可重试的下载"
-                    emptyText="没有失败或已取消的下载任务。"
-                    rows={retryableRows}
-                    onOpenLocation={handleOpenLocation}
-                    onDelete={handleDeleteHistoryRow}
-                    selectable
-                    selectedIds={selectedRetryIds}
-                    onSelectionChange={setSelectedRetryIds}
-                    onRetry={(row) => void handleRetryRow(row)}
-                    retryingIds={retryingRowIds}
-                  />
-                  {retryableRows.length > 0 ? (
-                    <div className="dl-batch-retry">
-                      <button
-                        type="button"
-                        className="batch-download-btn"
-                        disabled={selectedRetryIds.size === 0}
-                        onClick={() => void handleBatchRetry()}
-                      >
-                        批量重试（{selectedRetryIds.size}）
-                      </button>
-                    </div>
-                  ) : null}
-                </>
-              );
-            })()
+            <>
+              <DownloadsTable
+                mode="history"
+                ariaLabel="可重试的下载"
+                emptyText="没有失败或已取消的下载任务。"
+                rows={retryableRows}
+                onOpenLocation={onOpenLocation}
+                onDelete={onDeleteHistoryRow}
+                selectable
+                selectedIds={selectedRetryIds}
+                onSelectionChange={setSelectedRetryIds}
+                onRetry={onRetryRow}
+                retryingIds={retryingRowIds}
+              />
+              {retryableRows.length > 0 ? (
+                <div className="dl-batch-retry">
+                  <button
+                    type="button"
+                    className="batch-download-btn"
+                    disabled={selectedRetryCount === 0}
+                    onClick={() => void handleBatchRetry()}
+                  >
+                    批量重试（{selectedRetryCount}）
+                  </button>
+                </div>
+              ) : null}
+            </>
           )}
         </section>
 
